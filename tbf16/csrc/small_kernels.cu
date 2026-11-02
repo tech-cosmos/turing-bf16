@@ -129,8 +129,8 @@ __global__ void gemv_kernel(const __nv_bfloat16* __restrict__ x, const __half* _
 
 // Column amax: each thread covers 8 adjacent columns over a chunk of rows, merged with
 // atomicMax on the float bits (valid because the values are non-negative).
-__global__ void col_amax_kernel(const __nv_bfloat16* __restrict__ x, float* __restrict__ amax, int64_t R, int K,
-                                int64_t sx, int64_t rows_per_chunk) {
+__global__ void col_amax_kernel(const __nv_bfloat16* __restrict__ x, const float* __restrict__ row_mul,
+                                float* __restrict__ amax, int64_t R, int K, int64_t sx, int64_t rows_per_chunk) {
   const int c8 = blockIdx.x * blockDim.x + threadIdx.x;
   if (c8 >= K / 8) return;
   const int64_t r0 = blockIdx.y * rows_per_chunk, r1 = min(R, r0 + rows_per_chunk);
@@ -138,19 +138,21 @@ __global__ void col_amax_kernel(const __nv_bfloat16* __restrict__ x, float* __re
   for (int64_t r = r0; r < r1; ++r) {
     uint4 v = __ldg(reinterpret_cast<const uint4*>(x + r * sx) + c8);
     const __nv_bfloat162* h = reinterpret_cast<const __nv_bfloat162*>(&v);
+    const float rm = row_mul ? fabsf(row_mul[r]) : 1.f;
 #pragma unroll
     for (int j = 0; j < 4; ++j) {
       float2 f = __bfloat1622float2(h[j]);
-      m[2 * j] = fmaxf(m[2 * j], fabsf(f.x));
-      m[2 * j + 1] = fmaxf(m[2 * j + 1], fabsf(f.y));
+      m[2 * j] = fmaxf(m[2 * j], fabsf(f.x) * rm);
+      m[2 * j + 1] = fmaxf(m[2 * j + 1], fabsf(f.y) * rm);
     }
   }
 #pragma unroll
   for (int j = 0; j < 8; ++j) atomicMax(reinterpret_cast<int*>(amax) + c8 * 8 + j, __float_as_int(m[j]));
 }
 
-// y = x * s[col] as fp16 with s from the column amax; row 0 also writes 1/s.
-__global__ void col_convert_kernel(const __nv_bfloat16* __restrict__ x, const float* __restrict__ amax,
+// y = x * row_mul[row] * s[col] as fp16 with s from the column amax; row 0 also writes 1/s.
+__global__ void col_convert_kernel(const __nv_bfloat16* __restrict__ x, const float* __restrict__ row_mul,
+                                   const float* __restrict__ amax,
                                    __half* __restrict__ y, float* __restrict__ s_inv, int64_t R, int K, int64_t sx,
                                    int t) {
   const int K8 = K / 8;
@@ -161,12 +163,13 @@ __global__ void col_convert_kernel(const __nv_bfloat16* __restrict__ x, const fl
     const __nv_bfloat162* h = reinterpret_cast<const __nv_bfloat162*>(&v);
     __half2* q = reinterpret_cast<__half2*>(&o);
     float s[8];
+    const float rm = row_mul ? row_mul[r] : 1.f;
 #pragma unroll
     for (int j = 0; j < 8; ++j) s[j] = pow2_scale(amax[c + j], t);
 #pragma unroll
     for (int j = 0; j < 4; ++j) {
       float2 f = __bfloat1622float2(h[j]);
-      q[j] = __floats2half2_rn(f.x * s[2 * j], f.y * s[2 * j + 1]);
+      q[j] = __floats2half2_rn(f.x * rm * s[2 * j], f.y * rm * s[2 * j + 1]);
     }
     reinterpret_cast<uint4*>(y + r * K)[c / 8] = o;
     if (r == 0) {
@@ -307,7 +310,8 @@ torch::Tensor gemv(torch::Tensor x, torch::Tensor w16, torch::Tensor ws, c10::op
   return y;
 }
 
-std::vector<torch::Tensor> quantize_cols(torch::Tensor x, int64_t target_exp) {
+// row_mul (optional, R floats, powers of two) multiplies each row before the column scaling.
+std::vector<torch::Tensor> quantize_cols(torch::Tensor x, int64_t target_exp, c10::optional<torch::Tensor> row_mul) {
   TORCH_CHECK(x.is_cuda() && x.scalar_type() == at::kBFloat16 && x.dim() == 2 && x.stride(1) == 1);
   const int64_t R = x.size(0), K = x.size(1);
   TORCH_CHECK(K % 8 == 0 && x.stride(0) % 8 == 0 && aligned16(x), "quantize_cols: K and row stride must be multiples of 8");
@@ -320,12 +324,13 @@ std::vector<torch::Tensor> quantize_cols(torch::Tensor x, int64_t target_exp) {
   const int col_blocks = (int)((K / 8 + threads - 1) / threads);
   const int64_t chunks = std::max<int64_t>(1, std::min<int64_t>((R + 63) / 64, (68 * 16 + col_blocks - 1) / col_blocks));
   const int64_t rows_per_chunk = (R + chunks - 1) / chunks;
+  const float* rm = row_mul ? row_mul->data_ptr<float>() : nullptr;
   col_amax_kernel<<<dim3(col_blocks, (unsigned)chunks), threads, 0, stream>>>(
-      reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()), amax.data_ptr<float>(), R, (int)K, x.stride(0), rows_per_chunk);
+      reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()), rm, amax.data_ptr<float>(), R, (int)K, x.stride(0), rows_per_chunk);
   const int64_t work = R * K / 8;
   const int blocks = (int)std::min<int64_t>((work + 255) / 256, 68 * 32);
   col_convert_kernel<<<blocks, 256, 0, stream>>>(
-      reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()), amax.data_ptr<float>(),
+      reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()), rm, amax.data_ptr<float>(),
       reinterpret_cast<__half*>(y.data_ptr()), s_inv.data_ptr<float>(), R, (int)K, x.stride(0), (int)target_exp);
   return {y, s_inv};
 }

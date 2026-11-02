@@ -60,6 +60,7 @@ def main():
     model, tok = build(a)
     if a.recipe.endswith("+tbf16"):
         tbf16.convert(model, train=True)
+    model.train()  # from_pretrained returns eval mode, which also disables gradient checkpointing
     data = stdlib_bytes()
     if tok is not None:  # token ids for lora; byte ids for scratch
         text = bytes(data[: 20_000_000].tolist()).decode("utf-8", "ignore")

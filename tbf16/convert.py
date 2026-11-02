@@ -9,6 +9,7 @@ Training: every nn.Linear becomes a tbf16.TrainLinear (an nn.Linear subclass, sa
 parameters) whose forward and backward run on fp16 tensor cores for bf16 inputs.
 Both route F.scaled_dot_product_attention to tbf16's scaled attention for bf16 inputs.
 """
+import os
 import warnings
 
 import torch
@@ -18,6 +19,9 @@ import torch.nn.functional as F
 from . import autograd
 from .attention import sdpa
 from .ops import prepare_weight, scaled_linear
+
+# Train mode: linear layers with in or out features below this run in fp32 (cuBLAS SGEMM).
+MIN_DIM = int(os.environ.get("TBF16_MIN_DIM", 128))
 
 # Attention with fewer query rows (decoding) runs natively; it is as fast and skips the scaling.
 MIN_QUERY_ROWS = 16
@@ -55,11 +59,15 @@ class TrainLinear(nn.Linear):
             # bf16 mixed precision (fp32 master weights): do autocast's casts here, differentiably
             x, w = x.to(torch.bfloat16), w.to(torch.bfloat16)
             b = None if b is None else b.to(torch.bfloat16)
+        if x.dtype == w.dtype == torch.bfloat16 and x.is_cuda and min(w.shape) < MIN_DIM:
+            # Skinny layers (e.g. LoRA rank-16 adapters): torch's bf16 GEMM is ~20x slow on these
+            # shapes and tbf16's extra launches dominate, while fp32 SGEMM is cheap at this size.
+            return autograd.FP32LinearFn.apply(x, w, b)
         if x.dtype == w.dtype == torch.bfloat16 and x.is_cuda and x.shape[-1] % 8 == 0:
             if torch.is_grad_enabled() and (x.requires_grad or w.requires_grad):
                 return autograd.linear(x, w, b)
             return scaled_linear(x, *prepare_weight(w), b)
-        return super().forward(x)
+        return F.linear(x, w, b)
 
 
 _native_sdpa = F.scaled_dot_product_attention

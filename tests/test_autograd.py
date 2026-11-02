@@ -42,6 +42,28 @@ def ref_attn(q, k, v, causal):
     return torch.softmax(s, -1) @ v
 
 
+def attn_mask_case(name, mask_kind, Hq=8, Hkv=4, S=1000, D=64):
+    """Explicit masks (bool padding + sliding window, float additive) vs an fp64 reference."""
+    q = torch.randn(2, Hq, S, D, device="cuda").bfloat16()
+    k, v = (torch.randn(2, Hkv, S, D, device="cuda").bfloat16() for _ in range(2))
+    do = torch.randn(2, Hq, S, D, device="cuda").bfloat16()
+    i = torch.arange(S, device="cuda")
+    allowed = (i[None, :] <= i[:, None]) & (i[:, None] - i[None, :] < 256)  # causal sliding window
+    allowed = allowed[None, None].expand(2, 1, S, S).clone()
+    allowed[1, :, :, 700:] = False  # padding in the second sequence
+    allowed[1, :, :, 0] = True
+    mask = allowed if mask_kind == "bool" else torch.zeros(allowed.shape, device="cuda").masked_fill(~allowed, float("-inf")).bfloat16()
+
+    def ref(q, k, v):
+        k, v = k.repeat_interleave(Hq // Hkv, 1), v.repeat_interleave(Hq // Hkv, 1)
+        s = (q @ k.transpose(-1, -2) / math.sqrt(D)).masked_fill(~allowed, float("-inf"))
+        return torch.softmax(s, -1) @ v
+    r = grads(ref, [q.double(), k.double(), v.double()], do.double())
+    nat = grads(lambda q, k, v: F.scaled_dot_product_attention(q, k, v, attn_mask=mask, enable_gqa=True), [q, k, v], do)
+    ours = grads(lambda q, k, v: ag.sdpa(q, k, v, attn_mask=mask, enable_gqa=True), [q, k, v], do)
+    print(f"sdpa {name:<24}" + "  ".join(f"{n}: bf16 {rel(a, b)} tbf16 {rel(o, b)}" for n, a, o, b in zip(["o", "dq", "dk", "dv"], nat, ours, r)))
+
+
 def attn_case(name, Hq, Hkv, S, D, causal, qs=1.0, gs=1.0, vs=1.0):
     q = (torch.randn(1, Hq, S, D, device="cuda") * qs).bfloat16()
     k = (torch.randn(1, Hkv, S, D, device="cuda") * qs).bfloat16()
@@ -68,6 +90,8 @@ def main():
     attn_case("dO x1e-10 (needs scaling)", 8, 8, 1024, 64, True, gs=1e-10)
     attn_case("dO x1e6, v x1e4", 8, 8, 1024, 64, True, gs=1e6, vs=1e4)
     attn_case("peaky q,k x8", 8, 8, 1024, 64, True, qs=8)
+    attn_mask_case("bool mask, window+pad", "bool")
+    attn_mask_case("float mask, window+pad", "float")
 
     print()
     for M, K, N in [(8192, 2048, 6144), (8192, 6144, 2048)]:

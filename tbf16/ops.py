@@ -7,6 +7,7 @@ and undo the scales afterwards.
 """
 import math
 import os
+import weakref
 
 import torch
 import triton
@@ -94,6 +95,35 @@ def _epilogue_kernel(C, SA, SB, BIAS, OUT, M, N, HAS_BIAS: tl.constexpr, BM: tl.
     tl.store(OUT + offs, y.to(tl.bfloat16), mask=mask)
 
 
+class _RowCache:
+    """Reuses quantize_rows results when the same activation feeds several linear layers
+    (Q/K/V, gate/up). Keyed by tensor identity through a weakref plus the version counter,
+    so freed or modified tensors never hit."""
+
+    def __init__(self, size=8):
+        self.size, self.entries = size, []
+
+    def get(self, x, t, make):
+        for ref, ver, tt, val in self.entries:
+            if ref() is x and ver == x._version and tt == t:
+                return val
+        val = make()
+        self.entries.append((weakref.ref(x), x._version, t, val))
+        if len(self.entries) > self.size:
+            self.entries.pop(0)
+        return val
+
+
+_row_cache = _RowCache()
+
+
+def quantize_rows_shared(x: torch.Tensor):
+    """quantize_rows of x viewed as (-1, K), shared across calls on the same tensor."""
+    K = x.shape[-1]
+    t = _target_exp(K)
+    return _row_cache.get(x, t, lambda: quantize_rows(x.reshape(-1, K).contiguous(), t))
+
+
 def prepare_weight(w: torch.Tensor):
     """nn.Linear weight (N, K) bf16 -> (fp16 (N, K), fp32 (N,) inverse scales). Do this once."""
     return quantize_rows(w.contiguous(), _target_exp(w.shape[1]))
@@ -106,16 +136,22 @@ def scaled_linear(x: torch.Tensor, w16: torch.Tensor, w_sinv: torch.Tensor, bias
     x2 = x.reshape(-1, shape[-1]).contiguous()
     if x2.shape[0] < SMALL_M:
         return small_m_linear(x2, w16, w_sinv, bias).reshape(*shape[:-1], w16.shape[0])
-    x16, x_sinv = quantize_rows(x2, _target_exp(x2.shape[1]))
+    x16, x_sinv = quantize_rows_shared(x)
+    return linear_q(x16, x_sinv, w16, w_sinv, bias).reshape(*shape[:-1], w16.shape[0])
+
+
+@torch.autocast("cuda", enabled=False)
+def linear_q(x16, x_sinv, w16, w_sinv, bias=None):
+    """GEMM + epilogue on already-quantized rows: (x16 * x_sinv) @ (w16 * w_sinv)^T + bias, bf16 (M, N)."""
     c = x16 @ w16.t()  # cuBLAS fp16 tensor cores, fp32 accumulate; |c| < K * 4^t <= 65504
     M, N = c.shape
     if _cuda_ok(c):
-        return ext().epilogue(c, x_sinv, w_sinv, bias).reshape(*shape[:-1], N)
-    out = torch.empty((M, N), device=x.device, dtype=torch.bfloat16)
+        return ext().epilogue(c, x_sinv, w_sinv, bias)
+    out = torch.empty((M, N), device=c.device, dtype=torch.bfloat16)
     grid = (triton.cdiv(M, 64), triton.cdiv(N, 64))
     _epilogue_kernel[grid](c, x_sinv, w_sinv, bias if bias is not None else c, out, M, N,
                            HAS_BIAS=bias is not None, BM=64, BN=64, num_warps=4)
-    return out.reshape(*shape[:-1], N)
+    return out
 
 
 @triton.jit
