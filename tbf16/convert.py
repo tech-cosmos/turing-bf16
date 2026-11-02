@@ -3,14 +3,16 @@
     tbf16.convert(model)   # once, after loading; then run the model as usual
 
 Every bf16 nn.Linear becomes a tbf16.Linear holding its weight as fp16 plus one exact
-power-of-two scale per output row (same memory as bf16, same values), and
-F.scaled_dot_product_attention is routed to tbf16.sdpa for bf16 inputs.
+power-of-two scale per output row (same memory as bf16, same values), every bf16
+nn.Conv1d/2d/3d (and subclasses) runs on fp16 cuDNN kernels the same way (tbf16/conv.py),
+and F.scaled_dot_product_attention is routed to tbf16.sdpa for bf16 inputs.
 """
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from .attention import sdpa
+from .conv import convert_conv, convertible
 from .ops import prepare_weight, scaled_linear
 
 # Attention with fewer query rows (decoding) runs natively; it is as fast and skips the scaling.
@@ -42,7 +44,8 @@ class Linear(nn.Module):
 _native_sdpa = F.scaled_dot_product_attention
 
 
-def _sdpa(q, k, v, *args, **kwargs):
+def _sdpa(query, key, value, *args, **kwargs):  # torch's parameter names: callers pass them as keywords
+    q, k, v = query, key, value
     if (q.dtype == k.dtype == v.dtype == torch.bfloat16 and q.is_cuda and q.shape[-1] <= 256
             and q.shape[-2] >= MIN_QUERY_ROWS and not (torch.is_grad_enabled() and q.requires_grad)):
         return sdpa(q, k, v, *args, **kwargs)
@@ -58,7 +61,7 @@ def uninstall_sdpa():
     F.scaled_dot_product_attention = _native_sdpa
 
 
-def convert(model: nn.Module, sdpa=True):
+def convert(model: nn.Module, sdpa=True, conv=True):
     # A weight shared with another module (e.g. lm_head tied to the embedding) would be
     # stored twice, so those layers stay native.
     owners = {}
@@ -71,6 +74,8 @@ def convert(model: nn.Module, sdpa=True):
                     and owners[id(child.weight)] == 1):
                 setattr(mod, cname, Linear(child))
                 child.weight = None  # free the bf16 copy now, not when convert() returns
+            elif conv and convertible(child) and owners[id(child.weight)] == 1:
+                convert_conv(child)
     torch.cuda.empty_cache()
     if sdpa:
         install_sdpa()

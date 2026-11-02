@@ -45,12 +45,15 @@ class TuringBF16Mode(TorchFunctionMode):
                     return scaled_linear(x, *self._weight(w), b)
                 self.stats["linear_native"] += 1
         elif func is F.scaled_dot_product_attention:
-            q, k, v = args[:3]
+            kwargs = dict(kwargs)  # q, k, v may come as keywords (diffusers passes query=, key=, value=)
+            q, k, v = (args[i] if i < len(args) else kwargs.pop(n) for i, n in enumerate(("query", "key", "value")))
+            rest = args[3:]
             # Few query rows (decoding): native bf16 is as fast and skips the scaling kernels.
             if _ok(q, k, v) and not torch.is_grad_enabled() and q.shape[-1] <= 256 and q.shape[-2] >= self.min_rows:
                 self.stats["sdpa"] += 1
-                return sdpa(q, k, v, *args[3:], **kwargs)
+                return sdpa(q, k, v, *rest, **kwargs)
             self.stats["sdpa_native"] += 1
+            return func(q, k, v, *rest, **kwargs)
         return func(*args, **kwargs)
 
 

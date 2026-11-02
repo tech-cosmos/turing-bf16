@@ -32,8 +32,8 @@ def sdpa(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None, en
     a = torch.minimum(a, 14 - eq)
     a = torch.maximum(a, ek - 14)
     ev = _exponent(v, dim=(-2, -1))
-    if attn_mask is not None and attn_mask.dtype == torch.bfloat16:
-        attn_mask = attn_mask.half()
+    if attn_mask is not None and attn_mask.is_floating_point() and attn_mask.dtype != torch.float16:
+        attn_mask = attn_mask.half()  # additive masks must match q's dtype; large negatives become -inf
     out = F.scaled_dot_product_attention(
         _scale(q, a), _scale(k, -a), _scale(v, 14 - ev), attn_mask=attn_mask, dropout_p=dropout_p,
         is_causal=is_causal, scale=scale, enable_gqa=enable_gqa)
