@@ -52,6 +52,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="Qwen/Qwen3-1.7B")
     ap.add_argument("--ref", action="store_true")
+    ap.add_argument("--no-patch", action="store_true", help="skip patch() mode (it caches an fp16 copy of the weights)")
     ap.add_argument("--seqs", default="512,2048,4096,8192")
     a = ap.parse_args()
     seqs = list(map(int, a.seqs.split(",")))
@@ -65,33 +66,41 @@ def main():
     if a.ref:
         with torch.no_grad():
             logits["native bf16"] = model(ids, logits_to_keep=KEEP).logits.cpu()
-            with tbf16.patch():
-                logits["tbf16 patch"] = model(ids, logits_to_keep=KEEP).logits.cpu()
-            saved = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-            logits["model.half()"] = model.half()(ids, logits_to_keep=KEEP).logits.cpu()
-            model.bfloat16().load_state_dict(saved)  # .half() round trip is lossy; restore exact weights
-            del saved
+            if not a.no_patch:
+                with tbf16.patch():
+                    logits["tbf16 patch"] = model(ids, logits_to_keep=KEEP).logits.cpu()
 
     nat, gen_nat = run_suite("native bf16", model, ids_all, seqs)
-    pat, gen_pat = run_suite("tbf16 patch", model, ids_all, seqs, tbf16.patch)
+    gens = {}
+    if not a.no_patch:
+        _, gens["patch"] = run_suite("tbf16 patch", model, ids_all, seqs, tbf16.patch)
     tbf16.convert(model)
     print(f"  converted: weights {torch.cuda.memory_allocated() / 2**30:.2f} GB")
     if a.ref:
         with torch.no_grad():
             logits["tbf16 convert"] = model(ids, logits_to_keep=KEEP).logits.cpu()
-    con, gen_con = run_suite("tbf16 convert", model, ids_all, seqs)
+    con, gens["convert"] = run_suite("tbf16 convert", model, ids_all, seqs)
     for S in seqs:
         if S in con:
             print(f"  prefill {S:>5}: convert vs native " + (f"{nat[S] / con[S]:.2f}x" if S in nat else "(native OOM)"))
-    for n, g in (("patch", gen_pat), ("convert", gen_con)):
+    for n, g in gens.items():
         diff = (g != gen_nat)[0].nonzero()
         print(f"  greedy output vs native ({n}): " + ("identical" if len(diff) == 0 else f"first differs at token {diff[0].item()} of 128"))
 
     if a.ref:
-        del model; torch.cuda.empty_cache()
-        ref_model = AutoModelForCausalLM.from_pretrained(a.model, dtype=torch.float32, attn_implementation="sdpa").to("cuda:1").eval()
+        # Fresh fp16 load: a .half()/.bfloat16() round trip would also round fp32 buffers (rotary
+        # inv_freq) that load_state_dict does not restore.
+        del model; torch.cuda.empty_cache(); tbf16.uninstall_sdpa()
+        half = AutoModelForCausalLM.from_pretrained(a.model, dtype=torch.float16, attn_implementation="sdpa").cuda().eval()
         with torch.no_grad():
-            ref = ref_model(ids.to("cuda:1"), logits_to_keep=KEEP).logits.cpu()
+            logits["model.half()"] = half(ids, logits_to_keep=KEEP).logits.cpu()
+        del half; torch.cuda.empty_cache()
+        n = torch.cuda.device_count()
+        mem = {0: "0GiB", **{i: "10GiB" for i in range(1, n)}}  # fp32 reference on the other GPUs
+        ref_model = AutoModelForCausalLM.from_pretrained(a.model, dtype=torch.float32, attn_implementation="sdpa",
+                                                         device_map="auto", max_memory=mem).eval()
+        with torch.no_grad():
+            ref = ref_model(ids.to(ref_model.device), logits_to_keep=KEEP).logits.cpu()
         for n, l in logits.items():
             print(f"  {n:<14} {compare(l, ref)}")
 

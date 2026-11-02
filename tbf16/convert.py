@@ -43,7 +43,7 @@ _native_sdpa = F.scaled_dot_product_attention
 
 
 def _sdpa(q, k, v, *args, **kwargs):
-    if (q.dtype == k.dtype == v.dtype == torch.bfloat16 and q.is_cuda and q.shape[-1] <= 128
+    if (q.dtype == k.dtype == v.dtype == torch.bfloat16 and q.is_cuda and q.shape[-1] <= 256
             and q.shape[-2] >= MIN_QUERY_ROWS and not (torch.is_grad_enabled() and q.requires_grad)):
         return sdpa(q, k, v, *args, **kwargs)
     return _native_sdpa(q, k, v, *args, **kwargs)
@@ -70,7 +70,7 @@ def convert(model: nn.Module, sdpa=True):
             if (type(child) is nn.Linear and child.weight.dtype == torch.bfloat16 and child.weight.is_cuda
                     and owners[id(child.weight)] == 1):
                 setattr(mod, cname, Linear(child))
-                del child
+                child.weight = None  # free the bf16 copy now, not when convert() returns
     torch.cuda.empty_cache()
     if sdpa:
         install_sdpa()

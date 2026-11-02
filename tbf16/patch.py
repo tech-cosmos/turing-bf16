@@ -47,7 +47,7 @@ class TuringBF16Mode(TorchFunctionMode):
         elif func is F.scaled_dot_product_attention:
             q, k, v = args[:3]
             # Few query rows (decoding): native bf16 is as fast and skips the scaling kernels.
-            if _ok(q, k, v) and not torch.is_grad_enabled() and q.shape[-1] <= 128 and q.shape[-2] >= self.min_rows:
+            if _ok(q, k, v) and not torch.is_grad_enabled() and q.shape[-1] <= 256 and q.shape[-2] >= self.min_rows:
                 self.stats["sdpa"] += 1
                 return sdpa(q, k, v, *args[3:], **kwargs)
             self.stats["sdpa_native"] += 1

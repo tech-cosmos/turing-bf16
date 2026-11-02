@@ -1,0 +1,19 @@
+[project]
+name = "turing-bf16"
+version = "0.0.1"
+description = "Fast bf16 matmuls and attention on GPUs without bf16 tensor cores (Turing)"
+requires-python = ">=3.10"
+dependencies = ["torch>=2.6", "triton", "ninja"]
+
+[project.optional-dependencies]
+bench = ["transformers", "accelerate"]
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["tbf16*"]
+
+[tool.setuptools.package-data]
+tbf16 = ["csrc/*.cu"]
