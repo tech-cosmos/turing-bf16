@@ -96,7 +96,9 @@ def main():
             logits["model.half()"] = half(ids, logits_to_keep=KEEP).logits.cpu()
         del half; torch.cuda.empty_cache()
         n = torch.cuda.device_count()
-        mem = {0: "0GiB", **{i: "10GiB" for i in range(1, n)}}  # fp32 reference on the other GPUs
+        # fp32 reference on the other GPUs, leaving ~10% of each free for activations
+        mem = {0: "0GiB", **{i: f"{int(torch.cuda.get_device_properties(i).total_memory * 0.9 / 2**30)}GiB"
+                             for i in range(1, n)}}
         ref_model = AutoModelForCausalLM.from_pretrained(a.model, dtype=torch.float32, attn_implementation="sdpa",
                                                          device_map="auto", max_memory=mem).eval()
         with torch.no_grad():

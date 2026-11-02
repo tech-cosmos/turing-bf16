@@ -83,10 +83,12 @@ Requirements:
 ```bash
 pip install git+https://github.com/tech-cosmos/turing-bf16.git   # (repo is private for now)
 
-# nvcc matching your torch build, if you don't have a CUDA toolkit:
+# nvcc matching your torch build, if you don't have a CUDA toolkit. For CUDA 13 builds of torch
+# (the PyPI default), pip wheels work; pin all three to torch's CUDA version:
 python -c "import torch; print(torch.version.cuda)"              # e.g. 13.2
 pip install "nvidia-cuda-nvcc==13.2.*" "nvidia-nvvm==13.2.*" "nvidia-cuda-crt==13.2.*" ninja
-#   (for torch built with CUDA 12.x: pip install "nvidia-cuda-nvcc-cu12==12.X.*" ninja)
+#   For CUDA 12 builds of torch, the pip nvcc wheel ships only ptxas: install a CUDA 12 toolkit
+#   (system package, or `conda install -c nvidia cuda-nvcc`) and set CUDA_HOME if it isn't found.
 
 python -m tbf16    # checks the GPU, builds the kernels, verifies accuracy, prints a speedup
 ```
