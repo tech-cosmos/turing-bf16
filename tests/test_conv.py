@@ -95,4 +95,17 @@ with torch.no_grad():
     y32 = holder(x32)
 r32 = F.conv3d(F.pad(x32.double(), cc._pad), cc.dequantized_weight().double(), cc.bias.double())
 assert y32.dtype == torch.float32 and ((y32.double() - r32).norm() / r32.norm()).item() < 1e-5
+
+
+class FakePipe:  # diffusers pipelines expose their modules as .components
+    def __init__(self):
+        self.components = {"vae": nn.Sequential(nn.Conv2d(8, 8, 3, padding=1)).cuda().bfloat16(),
+                           "transformer": nn.Sequential(nn.Linear(8, 8)).cuda().bfloat16(),
+                           "scheduler": object(), "text_encoder": None}
+
+
+pipe = FakePipe()
+tbf16.convert(pipe, sdpa=False)
+assert type(pipe.components["vae"][0]).__name__ == "TBF16Conv2d"
+assert isinstance(pipe.components["transformer"][0], tbf16.Linear)
 print("ok")

@@ -1,6 +1,7 @@
 """Convert a bf16 model in place for Turing.
 
     tbf16.convert(model)   # once, after loading; then run the model as usual
+    tbf16.convert(pipe)    # diffusers pipeline: converts every nn.Module component
 
 Every bf16 nn.Linear becomes a tbf16.Linear holding its weight as fp16 plus one exact
 power-of-two scale per output row (same memory as bf16, same values), every bf16
@@ -61,7 +62,15 @@ def uninstall_sdpa():
     F.scaled_dot_product_attention = _native_sdpa
 
 
-def convert(model: nn.Module, sdpa=True, conv=True):
+def convert(model, sdpa=True, conv=True):
+    """Convert an nn.Module in place, or every nn.Module component of a diffusers pipeline."""
+    if not isinstance(model, nn.Module) and isinstance(getattr(model, "components", None), dict):
+        for c in model.components.values():
+            if isinstance(c, nn.Module):
+                convert(c, sdpa=False, conv=conv)
+        if sdpa:
+            install_sdpa()
+        return model
     # A weight shared with another module (e.g. lm_head tied to the embedding) would be
     # stored twice, so those layers stay native.
     owners = {}

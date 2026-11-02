@@ -8,15 +8,15 @@ once (cached on disk) so the text encoder never shares a GPU with the transforme
 
   fp32   transformer + VAE in fp32 on the second visible GPU (reference)
   bf16   native bf16 transformer + VAE
-  tbf16  the same bf16 weights after tbf16.convert(transformer) and tbf16.convert(vae)
+  tbf16  the same bf16 weights after tbf16.convert(pipe) (transformer and VAE)
   fp16   pipeline loaded with torch_dtype=float16 (diffusers keeps its fp32 modules in fp32)
 
 Per variant and size: s/step (median after the first step), denoise time, VAE decode time,
 peak memory per stage, OOM; PSNR/SSIM of the decoded frames vs bf16 and vs fp32; and the
 relative error of one transformer forward vs fp32 on identical inputs (captured from the
 fp32 run), which is not amplified by the sampler. If the VAE decode fails (OOM, or no cuDNN
-engine for a bf16 conv), the latents are
-decoded with an fp32 VAE so the denoiser can still be compared (marked "*").
+engine for a bf16 conv), the latents are decoded with an fp32 VAE on the GPU, or on the CPU
+if that OOMs too, so the denoiser can still be compared (marked "*"). Latents are saved.
 """
 import argparse, gc, hashlib, inspect, json, math, os, pathlib, time
 import torch
@@ -33,6 +33,7 @@ WAN_NEG = ("Bright tones, overexposed, static, blurred details, subtitles, style
 
 # ---------------------------------------------------------------------------------------- models
 class Wan:
+    name = "wan"
     repo = "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
     prompt = "A cat walks on the grass, realistic, sunny afternoon, shallow depth of field"
     guidance = 5.0
@@ -80,6 +81,7 @@ class Wan:
 
 
 class Sana:
+    name = "sana"
     repo = "Efficient-Large-Model/Sana_1600M_1024px_BF16_diffusers"
     prompt = ("a cyberpunk cat with a neon sign that says \"Sana\", rainy street at night, reflections, "
               "highly detailed")
@@ -179,7 +181,7 @@ def failure(e):
     raise e
 
 
-def run_variant(name, m, pipe, embeds, sizes, a, results, outputs, capture=None, fp32_vae=None):
+def run_variant(name, m, pipe, embeds, sizes, a, results, outputs, fp32_vae, capture=None):
     dev = pipe._execution_device
     tdtype = pipe.transformer.dtype
     emb = {k: v.to(dev, tdtype) if v.is_floating_point() else v.to(dev) for k, v in embeds.items()}
@@ -229,6 +231,8 @@ def run_variant(name, m, pipe, embeds, sizes, a, results, outputs, capture=None,
             if hook is not None:
                 hook.remove()
         lat_cpu = lat.float().cpu()
+        (pathlib.Path(a.out) / "latents").mkdir(parents=True, exist_ok=True)
+        torch.save(lat_cpu, pathlib.Path(a.out) / "latents" / f"{m.name}_{key}_{name}.pt")
         outputs.setdefault(key, {})[name + ":latents"] = lat_cpu
         del lat
         gc.collect(); torch.cuda.empty_cache(); torch.cuda.reset_peak_memory_stats(dev)
@@ -243,14 +247,22 @@ def run_variant(name, m, pipe, embeds, sizes, a, results, outputs, capture=None,
         except (torch.OutOfMemoryError, RuntimeError) as e:
             r["decode"] = failure(e)
             gc.collect(); torch.cuda.empty_cache()
-            if fp32_vae is None:
+            frames = None
+            for d in ([] if name == "fp32" else [dev]) + ["cpu"]:
+                try:
+                    vae = fp32_vae().to(d)
+                    with torch.no_grad():
+                        frames = m.decode(vae, lat_cpu.to(d))
+                    r["decoded_with"] = f"fp32 VAE on {d}"
+                    break
+                except torch.OutOfMemoryError:
+                    pass
+                finally:
+                    vae = None
+                    gc.collect(); torch.cuda.empty_cache()
+            if frames is None:
                 print(f"  {name:<6} {key:>12}: decode {r['decode']}", flush=True)
                 continue
-            vae = fp32_vae().to(dev)
-            with torch.no_grad():
-                frames = m.decode(vae, lat_cpu.to(dev))
-            del vae
-            r["decoded_with"] = "fp32 VAE"
         frames = to_uint8(frames)
         r["output_finite_nonblack"] = bool(frames.float().std() > 1.0)
         outputs[key][name] = frames
@@ -269,19 +281,16 @@ def one_forward(pipe, capture, dtype):
     return out.float().cpu()
 
 
-def strip(outputs, key, names, path, tile=256):
-    """Middle frame of each variant side by side with a label, as a small PNG."""
+def strip(frames, path, tile=256):
+    """[(label, (H, W, 3) uint8)] side by side with labels, as a small PNG."""
     from PIL import Image, ImageDraw
     tiles = []
-    for n in names:
-        if n not in outputs.get(key, {}):
-            continue
-        fr = outputs[key][n]
-        img = Image.fromarray(fr[fr.shape[0] // 2].numpy())
+    for label, fr in frames:
+        img = Image.fromarray(fr)
         img = img.resize((tile, round(tile * img.height / img.width)), Image.Resampling.LANCZOS)
         canvas = Image.new("RGB", (img.width, img.height + 18), "white")
         canvas.paste(img, (0, 18))
-        ImageDraw.Draw(canvas).text((4, 3), n, fill="black")
+        ImageDraw.Draw(canvas).text((4, 3), label, fill="black")
         tiles.append(canvas)
     if not tiles:
         return
@@ -293,6 +302,12 @@ def strip(outputs, key, names, path, tile=256):
     if os.path.getsize(path) > 200_000:
         out.quantize(256).save(path, optimize=True)
     print(f"  wrote {path} ({os.path.getsize(path) // 1024} KB)")
+
+
+def label(name, r):
+    if not r.get("decoded_with"):
+        return name
+    return name + (" (VAE decoded on CPU)" if name == "fp32" else f" (own VAE {r['decode']}: fp32 decode)")
 
 
 def main():
@@ -339,27 +354,26 @@ def main():
     if "fp32" in variants:
         ref_dev = "cuda:1" if torch.cuda.device_count() > 1 else "cuda:0"
         pipe = m.load(torch.float32, ref_dev)
-        run_variant("fp32", m, pipe, embeds, ref_sizes, a, results, outputs, capture=capture)
+        run_variant("fp32", m, pipe, embeds, ref_sizes, a, results, outputs, fp32_vae, capture=capture)
         if "inputs" in capture:
             fwd["fp32"] = one_forward(pipe, capture, torch.float32)
         free(pipe)
     if "bf16" in variants or "tbf16" in variants:
         pipe = m.load(torch.bfloat16, "cuda:0")
         if "bf16" in variants:
-            run_variant("bf16", m, pipe, embeds, sizes, a, results, outputs, fp32_vae=fp32_vae)
+            run_variant("bf16", m, pipe, embeds, sizes, a, results, outputs, fp32_vae)
             if "inputs" in capture:
                 fwd["bf16"] = one_forward(pipe, capture, torch.bfloat16)
         if "tbf16" in variants:
-            tbf16.convert(pipe.transformer)
-            tbf16.convert(pipe.vae)
-            run_variant("tbf16", m, pipe, embeds, sizes, a, results, outputs, fp32_vae=fp32_vae)
+            tbf16.convert(pipe)  # transformer and VAE (the text encoder is not loaded)
+            run_variant("tbf16", m, pipe, embeds, sizes, a, results, outputs, fp32_vae)
             if "inputs" in capture:
                 fwd["tbf16"] = one_forward(pipe, capture, torch.bfloat16)
             tbf16.uninstall_sdpa()
         free(pipe)
     if "fp16" in variants:
         pipe = m.load(torch.float16, "cuda:0")
-        run_variant("fp16", m, pipe, embeds, sizes, a, results, outputs, fp32_vae=fp32_vae)
+        run_variant("fp16", m, pipe, embeds, sizes, a, results, outputs, fp32_vae)
         if "inputs" in capture:
             fwd["fp16"] = one_forward(pipe, capture, torch.float16)
         free(pipe)
@@ -403,12 +417,14 @@ def main():
     json.dump(results, open(path, "w"), indent=1)
     print(f"  wrote {path}")
     if a.png:
-        strip(outputs, a.png, [v for v in ("fp32", "bf16", "tbf16", "fp16") if v in variants],
-              out_dir / f"{a.model}_{a.png}.png")
-        for n, fr in outputs.get(a.png, {}).items():
-            if ":" not in n:
-                from PIL import Image
-                Image.fromarray(fr[fr.shape[0] // 2].numpy()).save(out_dir / f"{a.model}_{a.png}_{n}_full.png")
+        from PIL import Image
+        outs, frames = outputs.get(a.png, {}), []
+        for n in ("fp32", "bf16", "tbf16", "fp16"):
+            if n in outs:
+                fr = outs[n][outs[n].shape[0] // 2].numpy()
+                Image.fromarray(fr).save(out_dir / f"{a.model}_{a.png}_{n}_full.png")
+                frames.append((label(n, results[a.png][n]), fr))
+        strip(frames, out_dir / f"{a.model}_{a.png}.png")
 
 
 if __name__ == "__main__":
