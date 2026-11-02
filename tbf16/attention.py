@@ -24,6 +24,7 @@ def _scale(x: torch.Tensor, e: torch.Tensor):
     return (x * torch.ldexp(torch.ones_like(e, dtype=x.dtype), e)).half()
 
 
+@torch.autocast("cuda", enabled=False)
 def sdpa(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None, enable_gqa=False):
     eq, ek = _exponent(q), _exponent(k)
     # After scaling, the maxima are 2**(eq+a) and 2**(ek-a); put both at ~2**((eq+ek)/2),

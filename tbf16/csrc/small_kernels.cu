@@ -127,6 +127,55 @@ __global__ void gemv_kernel(const __nv_bfloat16* __restrict__ x, const __half* _
   }
 }
 
+// Column amax: each thread covers 8 adjacent columns over a chunk of rows, merged with
+// atomicMax on the float bits (valid because the values are non-negative).
+__global__ void col_amax_kernel(const __nv_bfloat16* __restrict__ x, float* __restrict__ amax, int64_t R, int K,
+                                int64_t sx, int64_t rows_per_chunk) {
+  const int c8 = blockIdx.x * blockDim.x + threadIdx.x;
+  if (c8 >= K / 8) return;
+  const int64_t r0 = blockIdx.y * rows_per_chunk, r1 = min(R, r0 + rows_per_chunk);
+  float m[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+  for (int64_t r = r0; r < r1; ++r) {
+    uint4 v = __ldg(reinterpret_cast<const uint4*>(x + r * sx) + c8);
+    const __nv_bfloat162* h = reinterpret_cast<const __nv_bfloat162*>(&v);
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+      float2 f = __bfloat1622float2(h[j]);
+      m[2 * j] = fmaxf(m[2 * j], fabsf(f.x));
+      m[2 * j + 1] = fmaxf(m[2 * j + 1], fabsf(f.y));
+    }
+  }
+#pragma unroll
+  for (int j = 0; j < 8; ++j) atomicMax(reinterpret_cast<int*>(amax) + c8 * 8 + j, __float_as_int(m[j]));
+}
+
+// y = x * s[col] as fp16 with s from the column amax; row 0 also writes 1/s.
+__global__ void col_convert_kernel(const __nv_bfloat16* __restrict__ x, const float* __restrict__ amax,
+                                   __half* __restrict__ y, float* __restrict__ s_inv, int64_t R, int K, int64_t sx,
+                                   int t) {
+  const int K8 = K / 8;
+  for (int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x; i < R * K8; i += (int64_t)gridDim.x * blockDim.x) {
+    const int64_t r = i / K8;
+    const int c = (int)(i - r * K8) * 8;
+    uint4 v = __ldg(reinterpret_cast<const uint4*>(x + r * sx) + c / 8), o;
+    const __nv_bfloat162* h = reinterpret_cast<const __nv_bfloat162*>(&v);
+    __half2* q = reinterpret_cast<__half2*>(&o);
+    float s[8];
+#pragma unroll
+    for (int j = 0; j < 8; ++j) s[j] = pow2_scale(amax[c + j], t);
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+      float2 f = __bfloat1622float2(h[j]);
+      q[j] = __floats2half2_rn(f.x * s[2 * j], f.y * s[2 * j + 1]);
+    }
+    reinterpret_cast<uint4*>(y + r * K)[c / 8] = o;
+    if (r == 0) {
+#pragma unroll
+      for (int j = 0; j < 8; ++j) s_inv[c + j] = 1.f / s[j];
+    }
+  }
+}
+
 bool aligned16(const torch::Tensor& t) { return reinterpret_cast<uintptr_t>(t.data_ptr()) % 16 == 0; }
 
 }  // namespace
@@ -173,7 +222,31 @@ torch::Tensor gemv(torch::Tensor x, torch::Tensor w16, torch::Tensor ws, c10::op
   return y;
 }
 
+std::vector<torch::Tensor> quantize_cols(torch::Tensor x, int64_t target_exp) {
+  TORCH_CHECK(x.is_cuda() && x.scalar_type() == at::kBFloat16 && x.dim() == 2 && x.stride(1) == 1);
+  const int64_t R = x.size(0), K = x.size(1);
+  TORCH_CHECK(K % 8 == 0 && x.stride(0) % 8 == 0 && aligned16(x), "quantize_cols: K and row stride must be multiples of 8");
+  auto y = torch::empty({R, K}, x.options().dtype(at::kHalf));
+  auto s_inv = torch::empty({K}, x.options().dtype(at::kFloat));
+  auto amax = torch::zeros({K}, x.options().dtype(at::kFloat));
+  if (R == 0) return {y, s_inv.fill_(1.f)};
+  auto stream = c10::cuda::getCurrentCUDAStream();
+  const int threads = 128;
+  const int col_blocks = (int)((K / 8 + threads - 1) / threads);
+  const int64_t chunks = std::max<int64_t>(1, std::min<int64_t>((R + 63) / 64, (68 * 16 + col_blocks - 1) / col_blocks));
+  const int64_t rows_per_chunk = (R + chunks - 1) / chunks;
+  col_amax_kernel<<<dim3(col_blocks, (unsigned)chunks), threads, 0, stream>>>(
+      reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()), amax.data_ptr<float>(), R, (int)K, x.stride(0), rows_per_chunk);
+  const int64_t work = R * K / 8;
+  const int blocks = (int)std::min<int64_t>((work + 255) / 256, 68 * 32);
+  col_convert_kernel<<<blocks, 256, 0, stream>>>(
+      reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()), amax.data_ptr<float>(),
+      reinterpret_cast<__half*>(y.data_ptr()), s_inv.data_ptr<float>(), R, (int)K, x.stride(0), (int)target_exp);
+  return {y, s_inv};
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("quantize_cols", &quantize_cols);
   m.def("quantize_rows", &quantize_rows);
   m.def("epilogue", &epilogue);
   m.def("gemv", &gemv);

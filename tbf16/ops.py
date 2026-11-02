@@ -99,6 +99,7 @@ def prepare_weight(w: torch.Tensor):
     return quantize_rows(w.contiguous(), _target_exp(w.shape[1]))
 
 
+@torch.autocast("cuda", enabled=False)  # autocast would turn the fp16 GEMM back into bf16
 def scaled_linear(x: torch.Tensor, w16: torch.Tensor, w_sinv: torch.Tensor, bias=None):
     """y = x @ W^T + b for bf16 x, with W given by prepare_weight. Returns bf16."""
     shape = x.shape
