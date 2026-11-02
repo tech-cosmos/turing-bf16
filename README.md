@@ -19,7 +19,7 @@ Compared with running the same bf16 model in plain PyTorch:
 | Attention, 4–16k tokens | 4–5 → **28–33 TFLOPS**, 4–7 GB → <1 GB | → **12.6–14.5 TFLOPS** (fp16 speed) |
 | Gemma 3 4B prompt, 2048 tokens (`.half()` gives NaN) | 2084 → **484 ms (4.3x)** | 5286 → **874 ms (6.0x)** |
 | Qwen3-1.7B prompt, 4096 tokens | 2455 → **423 ms (5.8x)** | 6319 → **852 ms (7.4x)** |
-| Wan2.1 1.3B video, s/step at 17x320x512 | 3.72 → **0.74 s (5.0x)**; 81x480x832 runs where native OOMs | |
+| Wan2.1 1.3B video, s/step | 3.72 → **0.74 s (5.0x)** at 17x320x512 | 27.2 → **4.45 s (6.1x)** at 17x480x832; the default 81x480x832 video runs where native OOMs |
 | Sana 1600M image, s/step at 1024² | | 2.24 → **0.40 s (5.6x)**; native bf16 VAE cannot decode at all |
 | UMT5-XXL text encoder (Wan's), 8 x 512 tokens | | 14.8 → **2.8 s (5.3x)** |
 | Training, matching loss curves | **1.5–2.6x** | linear/attention fwd+bwd **5.4–9.2x** |

@@ -350,6 +350,18 @@ Sana 1600M (`bench/e2e_diffusion.py --model sana`, 20 steps), seconds per step:
 - **Sana is sensitive to precision:** native bf16 itself is only 20.6 dB from fp32, while fp16 is
   28.8 dB from fp32.
 
+Wan2.1 T2V 1.3B (`bench/e2e_diffusion.py --model wan`, 20 steps), seconds per step:
+
+| | 17x480x832 | 81x480x832 (the default video) |
+|---|---|---|
+| native bf16 | 27.2 (VAE OOM) | OOM |
+| tbf16 | 4.45 (6.1x) | 41.1 (823 s denoise + 34 s decode) |
+| fp16 | 4.16 | 46.0 |
+| fp32 | 17.6 (VAE OOM) | |
+
+- **Accuracy:** tbf16 matches native bf16 (PSNR 36.3 dB / SSIM 0.984 to it). On one transformer
+  forward against fp32, the error is 9.0e-3 for both bf16 and tbf16, and 1.1e-3 for fp16.
+
 Ampere check (A10G): `convert()` is a no-op with a warning, as intended. The kernels still build
 (PTX) and the tests pass. Native bf16 runs at 90 TFLOPS there against tbf16's 73.
 
