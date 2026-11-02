@@ -6,6 +6,8 @@ import sys
 _HERE = pathlib.Path(__file__).parent
 _mod = None
 _failed = None
+_gemm = None
+_gemm_failed = None
 
 
 def _cuda_home():
@@ -38,17 +40,21 @@ def _ldflags():
     return [f"-L{d}"]
 
 
+def _load(name, src):
+    _cuda_home()
+    bindir = os.path.dirname(sys.executable)  # ninja from the venv, even when it is not activated
+    if bindir not in os.environ.get("PATH", "").split(os.pathsep):
+        os.environ["PATH"] = bindir + os.pathsep + os.environ.get("PATH", "")
+    from torch.utils.cpp_extension import load
+    return load(name=name, sources=[str(_HERE / "csrc" / src)], extra_ldflags=_ldflags(),
+                extra_cuda_cflags=["-O3", "-gencode=arch=compute_75,code=sm_75", "--use_fast_math"],
+                verbose=bool(os.environ.get("TBF16_VERBOSE")))
+
+
 def ext():
     global _mod
     if _mod is None:
-        _cuda_home()
-        bindir = os.path.dirname(sys.executable)  # ninja from the venv, even when it is not activated
-        if bindir not in os.environ.get("PATH", "").split(os.pathsep):
-            os.environ["PATH"] = bindir + os.pathsep + os.environ.get("PATH", "")
-        from torch.utils.cpp_extension import load
-        _mod = load(name="tbf16_ext", sources=[str(_HERE / "csrc" / "small_kernels.cu")],
-                    extra_ldflags=_ldflags(), extra_cuda_cflags=["-O3", "-gencode=arch=compute_75,code=sm_75", "--use_fast_math"],
-                    verbose=bool(os.environ.get("TBF16_VERBOSE")))
+        _mod = _load("tbf16_ext", "small_kernels.cu")
     return _mod
 
 
@@ -68,4 +74,27 @@ def available() -> bool:
         import warnings
         warnings.warn(f"tbf16: CUDA kernels unavailable, using Triton/torch fallbacks ({type(e).__name__}: "
                       f"{str(e).splitlines()[0][:200]}). See README 'Install'.")
+        return False
+
+
+def gemm_ext():
+    """Fused bf16 x fp16 GEMM (csrc/gemm_sm75.cu)."""
+    global _gemm
+    if _gemm is None:
+        _gemm = _load("tbf16_gemm", "gemm_sm75.cu")
+    return _gemm
+
+
+def gemm_available() -> bool:
+    """True if the fused GEMM builds/loads; otherwise scaled_linear keeps the cuBLAS path."""
+    global _gemm_failed
+    if _gemm is not None:
+        return True
+    if _gemm_failed is not None or not available():
+        return False
+    try:
+        gemm_ext()
+        return True
+    except Exception as e:
+        _gemm_failed = e
         return False
