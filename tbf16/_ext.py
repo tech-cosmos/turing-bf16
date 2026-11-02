@@ -1,4 +1,5 @@
 """JIT-builds the CUDA kernels on first use (cached under ~/.cache/torch_extensions)."""
+import hashlib
 import os
 import pathlib
 import sys
@@ -46,10 +47,14 @@ def _load(name, src):
     if bindir not in os.environ.get("PATH", "").split(os.pathsep):
         os.environ["PATH"] = bindir + os.pathsep + os.environ.get("PATH", "")
     from torch.utils.cpp_extension import load
-    return load(name=name, sources=[str(_HERE / "csrc" / src)], extra_ldflags=_ldflags(),
-                # sm_75 SASS plus PTX, so the kernels also JIT on newer GPUs (convert(..., force=True)).
-                extra_cuda_cflags=["-O3", "-gencode=arch=compute_75,code=sm_75",
-                                   "-gencode=arch=compute_75,code=compute_75", "--use_fast_math"],
+    path = _HERE / "csrc" / src
+    # sm_75 SASS plus PTX, so the kernels also JIT on newer GPUs (convert(..., force=True)).
+    flags = ["-O3", "-gencode=arch=compute_75,code=sm_75", "-gencode=arch=compute_75,code=compute_75",
+             "--use_fast_math"]
+    # The source hash is part of the name: torch's cache decides by file mtimes, so an upgraded
+    # or copied source can look older than a stale build and load the old kernels.
+    digest = hashlib.sha1(path.read_bytes() + " ".join(flags).encode()).hexdigest()[:10]
+    return load(name=f"{name}_{digest}", sources=[str(path)], extra_ldflags=_ldflags(), extra_cuda_cflags=flags,
                 verbose=bool(os.environ.get("TBF16_VERBOSE")))
 
 
