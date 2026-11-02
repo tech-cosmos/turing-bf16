@@ -6,6 +6,7 @@
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAStream.h>
 
 namespace {
@@ -54,6 +55,13 @@ __device__ __forceinline__ void mma_1688(float (&c)[4], uint32_t a0, uint32_t a1
       : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3]) : "r"(a0), "r"(a1), "r"(b));
 }
 
+// 16-byte read-only load that also pulls the rest of its 128-byte line (the next k-tile) into L2.
+__device__ __forceinline__ uint4 ldg_l2_128(const void* p) {
+  uint4 v;
+  asm("ld.global.nc.L2::128B.v4.u32 {%0,%1,%2,%3}, [%4];\n" : "=r"(v.x), "=r"(v.y), "=r"(v.z), "=r"(v.w) : "l"(p));
+  return v;
+}
+
 // Two packed bf16 -> two fp16 scaled by a power of two: exact for results in fp16's normal range.
 __device__ __forceinline__ uint32_t cvt2(uint32_t v, float s) {
   __half2 h = __floats2half2_rn(__uint_as_float(v << 16) * s, __uint_as_float(v & 0xffff0000u) * s);
@@ -74,11 +82,12 @@ gemm_kernel(const __nv_bfloat16* __restrict__ A, const __half* __restrict__ B, c
 
   const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
   const int wm = warp / WN, wn = warp % WN;
-  // Grouped launch order: 8 row tiles share W tiles while they are in L2.
+  // Grouped launch order: GM row tiles share W tiles while they are in L2.
+  constexpr int GM = 8;
   const int tiles_m = (M + BM - 1) / BM, tiles_n = (N + BN - 1) / BN;
-  const int group = blockIdx.x / (8 * tiles_n), first = group * 8, gsize = min(tiles_m - first, 8);
+  const int group = blockIdx.x / (GM * tiles_n), first = group * GM, gsize = min(tiles_m - first, GM);
   const int m0 = (first + (int)blockIdx.x % gsize) * BM;
-  const int n0 = ((int)blockIdx.x % (8 * tiles_n)) / gsize * BN;
+  const int n0 = ((int)blockIdx.x % (GM * tiles_n)) / gsize * BN;
 
   // Global -> register staging: thread loads chunk lc of rows lr + i * RP.
   const int lr = tid >> 2, lc = tid & 3;
@@ -101,10 +110,10 @@ gemm_kernel(const __nv_bfloat16* __restrict__ A, const __half* __restrict__ B, c
     const bool kok = kleft > 0;
 #pragma unroll
     for (int i = 0; i < AL; ++i)
-      ra[i] = kok && (aok >> i & 1) ? __ldg(reinterpret_cast<const uint4*>(ga + i * RP * lda)) : make_uint4(0, 0, 0, 0);
+      ra[i] = kok && (aok >> i & 1) ? ldg_l2_128(ga + i * RP * lda) : make_uint4(0, 0, 0, 0);
 #pragma unroll
     for (int i = 0; i < BL; ++i)
-      rb[i] = kok && (bok >> i & 1) ? __ldg(reinterpret_cast<const uint4*>(gb + i * RP * ldb)) : make_uint4(0, 0, 0, 0);
+      rb[i] = kok && (bok >> i & 1) ? ldg_l2_128(gb + i * RP * ldb) : make_uint4(0, 0, 0, 0);
     ga += BK;
     gb += BK;
     kleft -= BK;
@@ -243,13 +252,19 @@ torch::Tensor linear(torch::Tensor x, torch::Tensor w16, torch::Tensor ws, c10::
   TORCH_CHECK(w16.is_cuda() && w16.scalar_type() == at::kHalf && w16.dim() == 2 && w16.stride(1) == 1);
   TORCH_CHECK(ws.is_contiguous() && ws.scalar_type() == at::kFloat && ws.numel() == w16.size(0));
   const int64_t M = x.size(0), K = x.size(1), N = w16.size(0);
-  TORCH_CHECK(w16.size(1) == K && N % 8 == 0 && w16.stride(0) % 8 == 0 && aligned16(w16) && M * K < (1ll << 31) && M * N < (1ll << 31));
-  if (bias) TORCH_CHECK(bias->is_contiguous() && bias->scalar_type() == at::kBFloat16 && bias->numel() == N);
+  TORCH_CHECK(w16.size(1) == K && N % 8 == 0 && w16.stride(0) % 8 == 0 && aligned16(w16), "linear: N and K must be multiples of 8");
+  if (bias)
+    TORCH_CHECK(bias->is_contiguous() && bias->scalar_type() == at::kBFloat16 && bias->numel() == N &&
+                reinterpret_cast<uintptr_t>(bias->data_ptr()) % 4 == 0);
   auto s = row_scale(x);
   auto y = torch::empty({M, N}, x.options());
   if (M == 0 || N == 0) return y;
   const __nv_bfloat16* b = bias ? reinterpret_cast<const __nv_bfloat16*>(bias->data_ptr()) : nullptr;
-  if (cfg < 0) cfg = M <= 256 ? 2 : 0;
+  if (cfg < 0) {  // fewest waves; a 128x128 tile takes ~half the time of a 128x256 one, at ~5% lower efficiency
+    int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+    const int64_t t256 = ((M + 127) / 128) * ((N + 255) / 256), t128 = ((M + 127) / 128) * ((N + 127) / 128);
+    cfg = (t128 + sms - 1) / sms * 0.525 < (t256 + sms - 1) / sms ? 2 : 1;
+  }
   switch (cfg) {
     case 0: launch<256, 128, 4, 2>(x, s, w16, ws, b, y); break;
     case 1: launch<128, 256, 2, 4>(x, s, w16, ws, b, y); break;

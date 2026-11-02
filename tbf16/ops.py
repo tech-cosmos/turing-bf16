@@ -12,10 +12,14 @@ import torch
 import triton
 import triton.language as tl
 
-from ._ext import ext
+from ._ext import ext, gemm_ext
 
 # TBF16_BACKEND=triton forces the Triton kernels (slower to launch; used for comparison).
 _USE_CUDA = os.environ.get("TBF16_BACKEND", "cuda") == "cuda"
+# TBF16_GEMM=fused|cublas forces the GEMM for M >= SMALL_M: the fused kernel (csrc/gemm_sm75.cu)
+# or quantize + cuBLAS fp16 + epilogue. Unset, fused is used from FUSED_MIN_M rows up.
+_GEMM = os.environ.get("TBF16_GEMM", "")
+FUSED_MIN_M = 256
 
 
 def _target_exp(K: int) -> int:
@@ -99,12 +103,22 @@ def prepare_weight(w: torch.Tensor):
     return quantize_rows(w.contiguous(), _target_exp(w.shape[1]))
 
 
+def _use_fused(x2, w16, bias):
+    if not (_USE_CUDA and _GEMM != "cublas" and w16.shape[0] % 8 == 0 and _cuda_ok(x2, w16)):
+        return False
+    if bias is not None and not (bias.dtype == torch.bfloat16 and bias.is_contiguous() and bias.data_ptr() % 4 == 0):
+        return False
+    return _GEMM == "fused" or x2.shape[0] >= FUSED_MIN_M
+
+
 def scaled_linear(x: torch.Tensor, w16: torch.Tensor, w_sinv: torch.Tensor, bias=None):
     """y = x @ W^T + b for bf16 x, with W given by prepare_weight. Returns bf16."""
     shape = x.shape
     x2 = x.reshape(-1, shape[-1]).contiguous()
     if x2.shape[0] < SMALL_M:
         return small_m_linear(x2, w16, w_sinv, bias).reshape(*shape[:-1], w16.shape[0])
+    if _use_fused(x2, w16, bias):  # one GEMM kernel: x converted to fp16 on the fly, bf16 out
+        return gemm_ext().linear(x2, w16, w_sinv, bias, -1).reshape(*shape[:-1], w16.shape[0])
     x16, x_sinv = quantize_rows(x2, _target_exp(x2.shape[1]))
     c = x16 @ w16.t()  # cuBLAS fp16 tensor cores, fp32 accumulate; |c| < K * 4^t <= 65504
     M, N = c.shape
