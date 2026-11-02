@@ -12,12 +12,13 @@ def main():
     cap = torch.cuda.get_device_capability()
     print(f"GPU: {torch.cuda.get_device_name()} (sm_{cap[0]}{cap[1]})")
     import tbf16
-    from tbf16._ext import ext
+    from tbf16._ext import available
     print(f"tbf16 applies to this GPU: {tbf16.is_supported_gpu()}"
           + ("" if tbf16.is_supported_gpu() else "  (it has native bf16 or no fp16 tensor cores; convert() is a no-op)"))
     t = time.time()
-    ext()
-    print(f"CUDA kernels built/loaded in {time.time() - t:.1f} s")
+    ok_ext = available()
+    print(f"CUDA kernels: {'built/loaded' if ok_ext else 'NOT available (Triton/torch fallbacks in use)'} "
+          f"in {time.time() - t:.1f} s")
 
     torch.manual_seed(0)
     x = torch.randn(512, 1024, device="cuda").bfloat16() * 1e4  # outside fp16's range after a matmul

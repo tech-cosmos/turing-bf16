@@ -13,7 +13,7 @@ import torch
 import triton
 import triton.language as tl
 
-from ._ext import ext
+from ._ext import available, ext
 
 # TBF16_BACKEND=triton forces the Triton kernels (slower to launch; used for comparison).
 _USE_CUDA = os.environ.get("TBF16_BACKEND", "cuda") == "cuda"
@@ -26,7 +26,7 @@ def _target_exp(K: int) -> int:
 
 
 def _cuda_ok(*ts):
-    return _USE_CUDA and all(t.shape[-1] % 8 == 0 and t.stride(0) % 8 == 0 and t.data_ptr() % 16 == 0 for t in ts)
+    return _USE_CUDA and available() and all(t.shape[-1] % 8 == 0 and t.stride(0) % 8 == 0 and t.data_ptr() % 16 == 0 for t in ts)
 
 
 @triton.jit

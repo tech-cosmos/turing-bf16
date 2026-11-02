@@ -5,6 +5,7 @@ import sys
 
 _HERE = pathlib.Path(__file__).parent
 _mod = None
+_failed = None
 
 
 def _cuda_home():
@@ -49,3 +50,22 @@ def ext():
                     extra_ldflags=_ldflags(), extra_cuda_cflags=["-O3", "-gencode=arch=compute_75,code=sm_75", "--use_fast_math"],
                     verbose=bool(os.environ.get("TBF16_VERBOSE")))
     return _mod
+
+
+def available() -> bool:
+    """True if the CUDA kernels build/load here. On failure, warns once and tbf16 falls back to
+    its Triton/torch paths (correct, slower to launch)."""
+    global _failed
+    if _mod is not None:
+        return True
+    if _failed is not None:
+        return False
+    try:
+        ext()
+        return True
+    except Exception as e:  # missing nvcc/ninja, compiler mismatch, ...
+        _failed = e
+        import warnings
+        warnings.warn(f"tbf16: CUDA kernels unavailable, using Triton/torch fallbacks ({type(e).__name__}: "
+                      f"{str(e).splitlines()[0][:200]}). See README 'Install'.")
+        return False

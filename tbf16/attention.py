@@ -16,8 +16,9 @@ from ._ext import ext
 
 
 def _fast(x: torch.Tensor):
-    return (ops._USE_CUDA and x.dim() == 4 and x.stride(-1) == 1 and x.shape[-1] % 8 == 0 and x.data_ptr() % 16 == 0
-            and all(s % 8 == 0 for s in x.stride()[:3]) and x.dtype in (torch.bfloat16, torch.float16))
+    return (ops._USE_CUDA and ops.available() and x.dim() == 4 and x.stride(-1) == 1 and x.shape[-1] % 8 == 0
+            and x.data_ptr() % 16 == 0 and all(s % 8 == 0 for s in x.stride()[:3])
+            and x.dtype in (torch.bfloat16, torch.float16))
 
 
 def head_exp(x: torch.Tensor):
