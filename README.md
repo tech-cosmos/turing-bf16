@@ -11,23 +11,24 @@ tbf16.convert(pipe)                # diffusers pipelines
 tbf16.convert(model, train=True)   # training / LoRA fine-tuning
 ```
 
-On an RTX 2080 Ti, compared with running the same bf16 model in plain PyTorch:
+Compared with running the same bf16 model in plain PyTorch:
 
-| | torch bf16 | with tbf16 |
+| | RTX 2080 Ti: torch bf16 → tbf16 | Tesla T4: torch bf16 → tbf16 |
 |---|---|---|
-| Large matmuls | ~8 TFLOPS | **50–53 TFLOPS (6–8x)** |
-| Attention, 4–16k tokens | 4–5 TFLOPS, 4–7 GB, OOM at 16k | **28–33 TFLOPS, <1 GB** |
-| Gemma 3 4B prompt processing (2048 tokens) | 2084 ms | **484 ms (4.3x)**; `model.half()` gives NaN |
-| Qwen3-1.7B prompt processing (4096 tokens) | 2455 ms | **423 ms (5.8x)** |
-| Wan2.1 1.3B video, s/denoising step (17x320x512) | 3.72 s | **0.74 s (5.0x)**; 81x480x832 runs (native OOMs) |
-| bf16 conv layers (VAEs) | 6–8x slower than fp16, some unsupported | **fp16 speed** |
-| Training, matching loss curves | 1x | **1.5–2.6x** |
+| Large matmuls | 8 → **50–53 TFLOPS** | 2.9 → **24–30 TFLOPS** |
+| Attention, 4–16k tokens | 4–5 → **28–33 TFLOPS**, 4–7 GB → <1 GB | → **12.6–14.5 TFLOPS** (fp16 speed) |
+| Gemma 3 4B prompt, 2048 tokens (`.half()` gives NaN) | 2084 → **484 ms (4.3x)** | 5286 → **874 ms (6.0x)** |
+| Qwen3-1.7B prompt, 4096 tokens | 2455 → **423 ms (5.8x)** | 6319 → **852 ms (7.4x)** |
+| Wan2.1 1.3B video, s/step at 17x320x512 | 3.72 → **0.74 s (5.0x)**; 81x480x832 runs where native OOMs | |
+| Sana 1600M image, s/step at 1024² | | 2.24 → **0.40 s (5.6x)**; native bf16 VAE cannot decode at all |
+| UMT5-XXL text encoder (Wan's), 8 x 512 tokens | | 14.8 → **2.8 s (5.3x)** |
+| Training, matching loss curves | **1.5–2.6x** | linear/attention fwd+bwd **5.4–9.2x** |
 
 Full numbers, methods and negative results: [RESULTS.md](RESULTS.md).
 
-> Status: research code. Benchmarked on RTX 2080 Ti (sm_75) with torch 2.15 / CUDA 13.2. The
-> test suite also passes on an RTX A5000 (torch 2.11 / CUDA 12.8, `force=True`). Not yet
-> tested on T4, other Turing cards or V100. Linux only.
+> Status: research code. Benchmarked on RTX 2080 Ti and Tesla T4 (sm_75) with torch 2.15 /
+> CUDA 13.2. The test suite also passes on an RTX A5000 and an A10G (Ampere, `force=True`), where
+> `convert()` is a no-op by default. Not yet tested on other Turing cards or V100. Linux only.
 
 ## Why this exists
 
@@ -183,6 +184,7 @@ Environment variables:
 |---|---|
 | Turing GPU, bf16 model, prompt processing / batch inference / diffusion | **Use tbf16.** This is where the 3–8x is. |
 | Turing GPU, model known to be fp16-safe (e.g. Wan2.1, Sana, Qwen3) | `.half()` works and is 0–15% faster; tbf16 is the safe default when you don't know. |
+| Turing GPU, T5/UMT5 text encoders | fp16 is the most accurate there (Hugging Face clamps T5's huge activations, and fp16 keeps 3 more bits between layers). tbf16 is 5x faster than native bf16, with the same accuracy as native bf16. |
 | Turing GPU, bf16 model that overflows in fp16 (Gemma 3, many DiTs) | **Use tbf16.** `.half()` breaks; fp32 is 2x memory and slow. |
 | Turing GPU, single-stream token-by-token decoding | Same speed as native; it is memory bound either way. |
 | Turing GPU, training a model that is known to be fp16-safe | fp16 AMP + GradScaler is still 1.4–1.6x faster than tbf16 at small batch. tbf16 gives bf16 semantics (no loss scaling, no skipped steps) at 1.5–2.6x native bf16. |
