@@ -37,4 +37,6 @@ def sdpa(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None, en
     out = F.scaled_dot_product_attention(
         _scale(q, a), _scale(k, -a), _scale(v, 14 - ev), attn_mask=attn_mask, dropout_p=dropout_p,
         is_causal=is_causal, scale=scale, enable_gqa=enable_gqa)
+    if ev.shape[-3] != out.shape[-3]:  # GQA: each K/V head serves several query heads
+        ev = ev.repeat_interleave(out.shape[-3] // ev.shape[-3], dim=-3)
     return (out.float() * torch.ldexp(torch.ones_like(ev, dtype=torch.float32), ev - 14)).to(q.dtype)

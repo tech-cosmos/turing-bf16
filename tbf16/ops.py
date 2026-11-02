@@ -20,10 +20,17 @@ def _pow2_scale(amax):
 
 
 @triton.jit
-def _quantize_rows_kernel(X, Y, S_INV, K, stride_x, stride_y, BLOCK: tl.constexpr):
+def _quantize_rows_kernel(X, Y, S_INV, K, stride_x, stride_y, BLOCK: tl.constexpr, ONE_PASS: tl.constexpr):
     row = tl.program_id(0)
     x_row = X + row.to(tl.int64) * stride_x
     y_row = Y + row.to(tl.int64) * stride_y
+    if ONE_PASS:  # the whole row fits in registers: read it once
+        offs = tl.arange(0, BLOCK)
+        x = tl.load(x_row + offs, mask=offs < K, other=0.0).to(tl.float32)
+        s = _pow2_scale(tl.max(tl.abs(x), 0))
+        tl.store(y_row + offs, (x * s).to(tl.float16), mask=offs < K)
+        tl.store(S_INV + row, 1.0 / s)
+        return
     amax = tl.zeros((BLOCK,), tl.float32)
     for k in range(0, K, BLOCK):
         offs = k + tl.arange(0, BLOCK)
@@ -43,7 +50,11 @@ def quantize_rows(x: torch.Tensor):
     R, K = x.shape
     y = torch.empty((R, K), device=x.device, dtype=torch.float16)
     s_inv = torch.empty((R,), device=x.device, dtype=torch.float32)
-    _quantize_rows_kernel[(R,)](x, y, s_inv, K, x.stride(0), y.stride(0), BLOCK=1024, num_warps=4)
+    one_pass = K <= 16384
+    block = triton.next_power_of_2(K) if one_pass else 4096
+    warps = max(4, min(16, block // 512))
+    _quantize_rows_kernel[(R,)](x, y, s_inv, K, x.stride(0), y.stride(0), BLOCK=block, ONE_PASS=one_pass,
+                                num_warps=warps)
     return y, s_inv
 
 
