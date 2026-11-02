@@ -9,6 +9,8 @@ Training: every nn.Linear becomes a tbf16.TrainLinear (an nn.Linear subclass, sa
 parameters) whose forward and backward run on fp16 tensor cores for bf16 inputs.
 Both route F.scaled_dot_product_attention to tbf16's scaled attention for bf16 inputs.
 """
+import warnings
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -83,7 +85,21 @@ def uninstall_sdpa():
     F.scaled_dot_product_attention = _native_sdpa
 
 
-def convert(model: nn.Module, train: bool = False, sdpa: bool = True):
+def is_supported_gpu(device=None) -> bool:
+    """True on GPUs with fp16 tensor cores but no bf16 ones: Volta (sm_70) and Turing (sm_75).
+    (Only Turing is tested.) Ampere and newer run bf16 natively; older GPUs lack tensor cores."""
+    if not torch.cuda.is_available():
+        return False
+    return torch.cuda.get_device_capability(device) in ((7, 0), (7, 2), (7, 5))
+
+
+def convert(model: nn.Module, train: bool = False, sdpa: bool = True, force: bool = False):
+    """Convert in place and return the model. A no-op (with a warning) on GPUs that already
+    have bf16 tensor cores, unless force=True."""
+    if not force and not is_supported_gpu():
+        warnings.warn("tbf16.convert: this GPU is not Volta/Turing; leaving the model unchanged "
+                      "(native bf16 is already fast here). Pass force=True to convert anyway.")
+        return model
     if train:
         for mod in model.modules():
             if type(mod) is nn.Linear:
