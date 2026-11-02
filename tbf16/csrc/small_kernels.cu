@@ -28,8 +28,12 @@ __device__ __forceinline__ float warp_sum(float v) {
 }
 
 // One block per row. K % 8 == 0 and 16-byte aligned rows (checked on the host).
+// l1 = false: the row max goes to [2^(t-1), 2^t).
+// l1 = true:  the row's L1 norm goes to [2^(t-1), 2^t). With |w16| <= 1 the fp16 GEMM output is
+//             then bounded by 2^t, and rows with a few huge channels keep their max near 2^t, so
+//             their small channels stay out of fp16's subnormal range.
 __global__ void quantize_rows_kernel(const __nv_bfloat16* __restrict__ x, __half* __restrict__ y,
-                                     float* __restrict__ s_inv, int K, int64_t sx, int64_t sy, int t) {
+                                     float* __restrict__ s_inv, int K, int64_t sx, int64_t sy, int t, bool l1) {
   const int64_t row = blockIdx.x;
   const uint4* xr = reinterpret_cast<const uint4*>(x + row * sx);
   uint4* yr = reinterpret_cast<uint4*>(y + row * sy);
@@ -41,16 +45,16 @@ __global__ void quantize_rows_kernel(const __nv_bfloat16* __restrict__ x, __half
 #pragma unroll
     for (int j = 0; j < 4; ++j) {
       float2 f = __bfloat1622float2(h[j]);
-      amax = fmaxf(amax, fmaxf(fabsf(f.x), fabsf(f.y)));
+      amax = l1 ? amax + fabsf(f.x) + fabsf(f.y) : fmaxf(amax, fmaxf(fabsf(f.x), fabsf(f.y)));
     }
   }
   __shared__ float red[32];
-  amax = warp_max(amax);
+  amax = l1 ? warp_sum(amax) : warp_max(amax);
   if ((threadIdx.x & 31) == 0) red[threadIdx.x >> 5] = amax;
   __syncthreads();
   if (threadIdx.x < 32) {
     float v = threadIdx.x < blockDim.x / 32 ? red[threadIdx.x] : 0.f;
-    v = warp_max(v);
+    v = l1 ? warp_sum(v) : warp_max(v);
     if (threadIdx.x == 0) red[0] = v;
   }
   __syncthreads();
@@ -268,7 +272,7 @@ Strides4 strides4(const torch::Tensor& x) {
 
 }  // namespace
 
-std::vector<torch::Tensor> quantize_rows(torch::Tensor x, int64_t target_exp) {
+std::vector<torch::Tensor> quantize_rows(torch::Tensor x, int64_t target_exp, bool l1) {
   TORCH_CHECK(x.is_cuda() && x.scalar_type() == at::kBFloat16 && x.dim() == 2 && x.stride(1) == 1);
   const int64_t R = x.size(0), K = x.size(1);
   TORCH_CHECK(K % 8 == 0 && x.stride(0) % 8 == 0 && aligned16(x), "quantize_rows: K and row stride must be multiples of 8");
@@ -278,7 +282,7 @@ std::vector<torch::Tensor> quantize_rows(torch::Tensor x, int64_t target_exp) {
   const int threads = K >= 4096 ? 512 : K >= 1024 ? 256 : 128;
   quantize_rows_kernel<<<R, threads, 0, c10::cuda::getCurrentCUDAStream()>>>(
       reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()), reinterpret_cast<__half*>(y.data_ptr()),
-      s_inv.data_ptr<float>(), (int)K, x.stride(0), y.stride(0), (int)target_exp);
+      s_inv.data_ptr<float>(), (int)K, x.stride(0), y.stride(0), (int)target_exp, l1);
   return {y, s_inv};
 }
 

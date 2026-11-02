@@ -43,14 +43,15 @@ def _pow2_scale(amax):
 
 
 @triton.jit
-def _quantize_rows_kernel(X, Y, S_INV, K, stride_x, stride_y, MUL, BLOCK: tl.constexpr, ONE_PASS: tl.constexpr):
+def _quantize_rows_kernel(X, Y, S_INV, K, stride_x, stride_y, MUL, BLOCK: tl.constexpr, ONE_PASS: tl.constexpr,
+                          L1: tl.constexpr):
     row = tl.program_id(0)
     x_row = X + row.to(tl.int64) * stride_x
     y_row = Y + row.to(tl.int64) * stride_y
     if ONE_PASS:  # the whole row fits in registers: read it once
         offs = tl.arange(0, BLOCK)
         x = tl.load(x_row + offs, mask=offs < K, other=0.0).to(tl.float32)
-        s = _pow2_scale(tl.max(tl.abs(x), 0)) * MUL
+        s = _pow2_scale(tl.sum(tl.abs(x), 0) if L1 else tl.max(tl.abs(x), 0)) * MUL
         tl.store(y_row + offs, (x * s).to(tl.float16), mask=offs < K)
         tl.store(S_INV + row, 1.0 / s)
         return
@@ -58,8 +59,8 @@ def _quantize_rows_kernel(X, Y, S_INV, K, stride_x, stride_y, MUL, BLOCK: tl.con
     for k in range(0, K, BLOCK):
         offs = k + tl.arange(0, BLOCK)
         x = tl.load(x_row + offs, mask=offs < K, other=0.0).to(tl.float32)
-        amax = tl.maximum(amax, tl.abs(x))
-    s = _pow2_scale(tl.max(amax, 0)) * MUL
+        amax = amax + tl.abs(x) if L1 else tl.maximum(amax, tl.abs(x))
+    s = _pow2_scale(tl.sum(amax, 0) if L1 else tl.max(amax, 0)) * MUL
     for k in range(0, K, BLOCK):
         offs = k + tl.arange(0, BLOCK)
         x = tl.load(x_row + offs, mask=offs < K, other=0.0).to(tl.float32)
@@ -67,11 +68,12 @@ def _quantize_rows_kernel(X, Y, S_INV, K, stride_x, stride_y, MUL, BLOCK: tl.con
     tl.store(S_INV + row, 1.0 / s)  # exact: s is a power of two
 
 
-def quantize_rows(x: torch.Tensor, target_exp: int = 0):
-    """bf16 (R, K) -> (fp16 (R, K), fp32 (R,) inverse scales). Lossless for normal bf16 values."""
+def quantize_rows(x: torch.Tensor, target_exp: int = 0, l1: bool = False):
+    """bf16 (R, K) -> (fp16 (R, K), fp32 (R,) inverse scales). Lossless for normal bf16 values.
+    Each row's max (or with l1=True its L1 norm) is scaled into [2^(t-1), 2^t)."""
     assert x.dim() == 2 and x.stride(1) == 1
     if _cuda_ok(x):
-        return tuple(ext().quantize_rows(x, target_exp))
+        return tuple(ext().quantize_rows(x, target_exp, l1))
     R, K = x.shape
     y = torch.empty((R, K), device=x.device, dtype=torch.float16)
     s_inv = torch.empty((R,), device=x.device, dtype=torch.float32)
@@ -79,7 +81,7 @@ def quantize_rows(x: torch.Tensor, target_exp: int = 0):
     block = triton.next_power_of_2(K) if one_pass else 4096
     warps = max(4, min(16, block // 512))
     _quantize_rows_kernel[(R,)](x, y, s_inv, K, x.stride(0), y.stride(0), 2.0 ** target_exp, BLOCK=block,
-                                ONE_PASS=one_pass,
+                                ONE_PASS=one_pass, L1=l1,
                                 num_warps=warps)
     return y, s_inv
 
@@ -121,11 +123,15 @@ class _RowCache:
 _row_cache = _RowCache()
 
 
-def quantize_rows_shared(x: torch.Tensor):
+# Inference rows: L1 norm below 2^15, so with |w16| <= 1 the fp16 GEMM output cannot overflow.
+L1_TARGET = 15
+
+
+def quantize_rows_shared(x: torch.Tensor, l1: bool = False):
     """quantize_rows of x viewed as (-1, K), shared across calls on the same tensor."""
     K = x.shape[-1]
-    t = _target_exp(K)
-    return _row_cache.get(x, t, lambda: quantize_rows(x.reshape(-1, K).contiguous(), t))
+    t = L1_TARGET if l1 else _target_exp(K)
+    return _row_cache.get(x, (t, l1), lambda: quantize_rows(x.reshape(-1, K).contiguous(), t, l1))
 
 
 def prepare_weight(w: torch.Tensor):
@@ -150,7 +156,7 @@ def scaled_linear(x: torch.Tensor, w16: torch.Tensor, w_sinv: torch.Tensor, bias
         return small_m_linear(x2, w16, w_sinv, bias).reshape(*shape[:-1], w16.shape[0])
     if _use_fused(x2, w16, bias):  # one GEMM kernel: x converted to fp16 on the fly, bf16 out
         return gemm_ext().linear(x2, w16, w_sinv, bias, -1).reshape(*shape[:-1], w16.shape[0])
-    x16, x_sinv = quantize_rows_shared(x)
+    x16, x_sinv = quantize_rows_shared(x, l1=True)
     return linear_q(x16, x_sinv, w16, w_sinv, bias).reshape(*shape[:-1], w16.shape[0])
 
 

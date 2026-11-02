@@ -35,14 +35,15 @@ def head_scale(x: torch.Tensor, e: torch.Tensor, dtype):
     return (x.float() * torch.ldexp(torch.ones_like(e, dtype=torch.float32), e)[..., None, None]).to(dtype)
 
 
-def prepare_qkv(q, k, v):
-    """Scaled fp16 copies of q, k, v and the exponents to undo them: (q16, k16, v16, a, ev)."""
+def prepare_qkv(q, k, v, v_exp=0):
+    """Scaled fp16 copies of q, k, v and the exponents to undo them: (q16, k16, v16, a, ev).
+    V's per-head max goes to [2^(v_exp-1), 2^v_exp); ev already includes -v_exp."""
     eq, ek = head_exp(q).amax(), head_exp(k).amax()
     # After scaling, the maxima are 2**(eq+a) and 2**(ek-a); put both at ~2**((eq+ek)/2),
     # keeping them at most 2**14 so q.k products stay inside fp16 inputs.
     a = torch.div(ek - eq, 2, rounding_mode="floor")
     a = torch.maximum(torch.minimum(a, 14 - eq), ek - 14)
-    ev = head_exp(v)  # v16 max in [0.5, 1): headroom for the backward pass
+    ev = head_exp(v) - v_exp
     q16, k16, v16 = head_scale(q, a, torch.float16), head_scale(k, -a, torch.float16), head_scale(v, -ev, torch.float16)
     return q16, k16, v16, a, ev
 
@@ -54,7 +55,9 @@ def expand_heads(e, n_heads):
 
 @torch.autocast("cuda", enabled=False)
 def sdpa(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None, enable_gqa=False):
-    q16, k16, v16, _, ev = prepare_qkv(q, k, v)
+    # Inference: V's max near 2^13 keeps channels far below it out of fp16's subnormals (T5/UMT5
+    # have ~4e5 outlier channels). The output is a convex combination of V rows, so it cannot overflow.
+    q16, k16, v16, _, ev = prepare_qkv(q, k, v, v_exp=13)
     if attn_mask is not None and attn_mask.is_floating_point() and attn_mask.dtype != torch.float16:
         attn_mask = attn_mask.half()  # additive masks must match q's dtype; large negatives become -inf
     out = F.scaled_dot_product_attention(q16, k16, v16, attn_mask=attn_mask, dropout_p=dropout_p,

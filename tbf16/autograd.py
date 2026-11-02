@@ -76,7 +76,7 @@ class ScaledLinearFn(torch.autograd.Function):
         dx = dw = db = None
         if ctx.needs_input_grad[0]:  # contraction over N
             t = ops._target_exp(N)
-            dy16, sdy = ops.quantize_rows(dy2, t)
+            dy16, sdy = ops.quantize_rows(dy2, ops.L1_TARGET, l1=True)  # |w16c| <= 1 bounds dX16 by 2^15
             w16c, swc = quantize_cols(w.contiguous(), t)
             dx = _scaled_mm(dy16, sdy, w16c, swc).reshape(ctx.x_shape)
         if ctx.needs_input_grad[1]:  # contraction over M

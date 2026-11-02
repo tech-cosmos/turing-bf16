@@ -13,11 +13,13 @@ namespace {
 
 constexpr int BK = 32;  // k per smem stage: 64-byte rows of four 16-byte chunks
 
-// Exact power of two s with amax * s in [0.5, 1), built from exponent bits.
+// Exact power of two s with amax * s in [2^14, 2^15), built from exponent bits. Products are
+// accumulated in fp32 and the output is written as bf16, so only the fp16 inputs must fit; a max
+// near 2^15 keeps channels up to 2^28 smaller than it out of fp16's subnormals (T5-style outliers).
 __device__ __forceinline__ float pow2_scale(float amax) {
   int e = (__float_as_int(amax) >> 23) & 0xFF;
   e = min(max(e, 1), 252);
-  return __int_as_float((253 - e) << 23);
+  return __int_as_float(min(268 - e, 254) << 23);
 }
 
 // s_inv[r] = 1 / pow2_scale(max |x[r, :]|). One warp per row. K % 8 == 0, 16-byte aligned rows.
