@@ -66,7 +66,7 @@ _native_sdpa = F.scaled_dot_product_attention
 def _sdpa(q, k, v, *args, **kwargs):
     if q.is_cuda and torch.is_autocast_enabled("cuda") and torch.get_autocast_dtype("cuda") == torch.bfloat16:
         q, k, v = q.to(torch.bfloat16), k.to(torch.bfloat16), v.to(torch.bfloat16)  # what autocast would do
-    if (q.dtype == k.dtype == v.dtype == torch.bfloat16 and q.is_cuda and q.shape[-1] <= 256
+    if (q.dtype == k.dtype == v.dtype == torch.bfloat16 and q.is_cuda and q.dim() == 4 and q.shape[-1] <= 256
             and q.shape[-2] >= MIN_QUERY_ROWS):
         if torch.is_grad_enabled() and (q.requires_grad or k.requires_grad or v.requires_grad):
             return autograd.sdpa(q, k, v, *args, **kwargs)

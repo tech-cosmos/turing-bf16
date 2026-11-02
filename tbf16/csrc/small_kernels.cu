@@ -176,7 +176,92 @@ __global__ void col_convert_kernel(const __nv_bfloat16* __restrict__ x, const fl
   }
 }
 
+// ---- Attention helpers: per-(batch, head) amax and power-of-two scale + cast ----
+// x is (B, H, S, D) with any strides except a contiguous last dim; D % 8 == 0.
+
+template <typename T> __device__ __forceinline__ void load8(const T* p, float* f);
+template <> __device__ __forceinline__ void load8<__nv_bfloat16>(const __nv_bfloat16* p, float* f) {
+  uint4 v = *reinterpret_cast<const uint4*>(p);
+  const __nv_bfloat162* h = reinterpret_cast<const __nv_bfloat162*>(&v);
+#pragma unroll
+  for (int j = 0; j < 4; ++j) { float2 t = __bfloat1622float2(h[j]); f[2 * j] = t.x; f[2 * j + 1] = t.y; }
+}
+template <> __device__ __forceinline__ void load8<__half>(const __half* p, float* f) {
+  uint4 v = *reinterpret_cast<const uint4*>(p);
+  const __half2* h = reinterpret_cast<const __half2*>(&v);
+#pragma unroll
+  for (int j = 0; j < 4; ++j) { float2 t = __half22float2(h[j]); f[2 * j] = t.x; f[2 * j + 1] = t.y; }
+}
+template <typename T> __device__ __forceinline__ void store8(T* p, const float* f);
+template <> __device__ __forceinline__ void store8<__nv_bfloat16>(__nv_bfloat16* p, const float* f) {
+  uint4 v;
+  __nv_bfloat162* h = reinterpret_cast<__nv_bfloat162*>(&v);
+#pragma unroll
+  for (int j = 0; j < 4; ++j) h[j] = __floats2bfloat162_rn(f[2 * j], f[2 * j + 1]);
+  *reinterpret_cast<uint4*>(p) = v;
+}
+template <> __device__ __forceinline__ void store8<__half>(__half* p, const float* f) {
+  uint4 v;
+  __half2* h = reinterpret_cast<__half2*>(&v);
+#pragma unroll
+  for (int j = 0; j < 4; ++j) h[j] = __floats2half2_rn(f[2 * j], f[2 * j + 1]);
+  *reinterpret_cast<uint4*>(p) = v;
+}
+
+struct Strides4 { int64_t b, h, s; int H, S, D; };
+
+// grid (B*H, chunks); amax over each (b, h) slice, merged with atomicMax on float bits.
+template <typename T>
+__global__ void head_amax_kernel(const T* __restrict__ x, float* __restrict__ out, Strides4 st, int rows_per_chunk) {
+  const int bh = blockIdx.x, b = bh / st.H, h = bh % st.H;
+  const T* base = x + b * st.b + h * st.h;
+  const int D8 = st.D / 8, s0 = blockIdx.y * rows_per_chunk, s1 = min(st.S, s0 + rows_per_chunk);
+  float m = 0.f;
+  for (int i = threadIdx.x; i < (s1 - s0) * D8; i += blockDim.x) {
+    const int s = s0 + i / D8, d = (i % D8) * 8;
+    float f[8];
+    load8<T>(base + s * st.s + d, f);
+#pragma unroll
+    for (int j = 0; j < 8; ++j) m = fmaxf(m, fabsf(f[j]));
+  }
+  __shared__ float red[32];
+  m = warp_max(m);
+  if ((threadIdx.x & 31) == 0) red[threadIdx.x >> 5] = m;
+  __syncthreads();
+  if (threadIdx.x < 32) {
+    float v = threadIdx.x < blockDim.x / 32 ? red[threadIdx.x] : 0.f;
+    v = warp_max(v);
+    if (threadIdx.x == 0) atomicMax(reinterpret_cast<int*>(out) + bh, __float_as_int(v));
+  }
+}
+
+// y (contiguous B, H, S, D) = x * 2^e[b*H + h]; e is int32 per (b, h).
+template <typename Tin, typename Tout>
+__global__ void head_scale_cast_kernel(const Tin* __restrict__ x, const int* __restrict__ e, Tout* __restrict__ y,
+                                       Strides4 st, int64_t total8) {
+  const int D8 = st.D / 8;
+  for (int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x; i < total8; i += (int64_t)gridDim.x * blockDim.x) {
+    const int d = (int)(i % D8) * 8;
+    const int64_t row = i / D8;
+    const int s = (int)(row % st.S);
+    const int64_t bh = row / st.S;
+    const int b = (int)(bh / st.H), h = (int)(bh % st.H);
+    const float sc = ldexpf(1.f, e[bh]);
+    float f[8];
+    load8<Tin>(x + b * st.b + h * st.h + s * st.s + d, f);
+#pragma unroll
+    for (int j = 0; j < 8; ++j) f[j] *= sc;
+    store8<Tout>(y + i * 8, f);
+  }
+}
+
 bool aligned16(const torch::Tensor& t) { return reinterpret_cast<uintptr_t>(t.data_ptr()) % 16 == 0; }
+
+Strides4 strides4(const torch::Tensor& x) {
+  TORCH_CHECK(x.dim() == 4 && x.stride(3) == 1 && x.size(3) % 8 == 0 && aligned16(x) && x.stride(0) % 8 == 0 &&
+              x.stride(1) % 8 == 0 && x.stride(2) % 8 == 0, "expected (B, H, S, D) with contiguous D % 8 == 0");
+  return Strides4{x.stride(0), x.stride(1), x.stride(2), (int)x.size(1), (int)x.size(2), (int)x.size(3)};
+}
 
 }  // namespace
 
@@ -245,7 +330,48 @@ std::vector<torch::Tensor> quantize_cols(torch::Tensor x, int64_t target_exp) {
   return {y, s_inv};
 }
 
+torch::Tensor head_amax(torch::Tensor x) {
+  auto st = strides4(x);
+  const int BH = (int)(x.size(0) * x.size(1));
+  auto out = torch::zeros({x.size(0), x.size(1)}, x.options().dtype(at::kFloat));
+  if (x.numel() == 0) return out;
+  const int chunks = std::max(1, std::min((68 * 8 + BH - 1) / BH, (st.S + 63) / 64));
+  const int rows = (st.S + chunks - 1) / chunks;
+  auto stream = c10::cuda::getCurrentCUDAStream();
+  if (x.scalar_type() == at::kBFloat16)
+    head_amax_kernel<__nv_bfloat16><<<dim3(BH, chunks), 256, 0, stream>>>(
+        reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()), out.data_ptr<float>(), st, rows);
+  else if (x.scalar_type() == at::kHalf)
+    head_amax_kernel<__half><<<dim3(BH, chunks), 256, 0, stream>>>(
+        reinterpret_cast<const __half*>(x.data_ptr()), out.data_ptr<float>(), st, rows);
+  else
+    TORCH_CHECK(false, "head_amax: bf16 or fp16");
+  return out;
+}
+
+torch::Tensor head_scale_cast(torch::Tensor x, torch::Tensor e, at::ScalarType out_dtype) {
+  auto st = strides4(x);
+  TORCH_CHECK(e.scalar_type() == at::kInt && e.is_contiguous() && e.numel() == x.size(0) * x.size(1));
+  auto y = torch::empty(x.sizes(), x.options().dtype(out_dtype));
+  const int64_t total8 = x.numel() / 8;
+  if (total8 == 0) return y;
+  const int blocks = (int)std::min<int64_t>((total8 + 255) / 256, 68 * 32);
+  auto stream = c10::cuda::getCurrentCUDAStream();
+  const int* ep = e.data_ptr<int>();
+#define LAUNCH(TI, TO) head_scale_cast_kernel<TI, TO><<<blocks, 256, 0, stream>>>( \
+    reinterpret_cast<const TI*>(x.data_ptr()), ep, reinterpret_cast<TO*>(y.data_ptr()), st, total8)
+  if (x.scalar_type() == at::kBFloat16 && out_dtype == at::kHalf) LAUNCH(__nv_bfloat16, __half);
+  else if (x.scalar_type() == at::kHalf && out_dtype == at::kBFloat16) LAUNCH(__half, __nv_bfloat16);
+  else if (x.scalar_type() == at::kBFloat16 && out_dtype == at::kBFloat16) LAUNCH(__nv_bfloat16, __nv_bfloat16);
+  else if (x.scalar_type() == at::kHalf && out_dtype == at::kHalf) LAUNCH(__half, __half);
+  else TORCH_CHECK(false, "head_scale_cast: bf16/fp16 only");
+#undef LAUNCH
+  return y;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("head_amax", &head_amax);
+  m.def("head_scale_cast", &head_scale_cast);
   m.def("quantize_cols", &quantize_cols);
   m.def("quantize_rows", &quantize_rows);
   m.def("epilogue", &epilogue);

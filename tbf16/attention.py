@@ -11,33 +11,50 @@ the softmax scale. Real models are many orders of magnitude below that.
 import torch
 import torch.nn.functional as F
 
-
-def _exponent(x: torch.Tensor, dim=None):
-    """e with amax(|x|) = m * 2**e, m in [0.5, 1). Zero tensors give 0."""
-    amax = x.abs().amax() if dim is None else x.abs().amax(dim=dim, keepdim=True)
-    amax = amax.float()
-    return torch.frexp(torch.where(amax > 0, amax, torch.ones_like(amax)))[1]
+from . import ops
+from ._ext import ext
 
 
-def _scale(x: torch.Tensor, e: torch.Tensor):
-    """x * 2**e as fp16. Exact: a power-of-two multiply in bf16 then a cast that stays in range."""
-    return (x * torch.ldexp(torch.ones_like(e, dtype=x.dtype), e)).half()
+def _fast(x: torch.Tensor):
+    return (ops._USE_CUDA and x.dim() == 4 and x.stride(-1) == 1 and x.shape[-1] % 8 == 0 and x.data_ptr() % 16 == 0
+            and all(s % 8 == 0 for s in x.stride()[:3]) and x.dtype in (torch.bfloat16, torch.float16))
+
+
+def head_exp(x: torch.Tensor):
+    """int32 (B, H): e with amax(|x[b, h]|) = m * 2**e, m in [0.5, 1) (0 for all-zero heads)."""
+    amax = ext().head_amax(x) if _fast(x) else x.abs().amax(dim=(-2, -1)).float()
+    return torch.frexp(amax)[1]
+
+
+def head_scale(x: torch.Tensor, e: torch.Tensor, dtype):
+    """x * 2**e[b, h] cast to dtype, as a contiguous (B, H, S, D) tensor. Exact while in range."""
+    e = e.to(torch.int32).expand(x.shape[0], x.shape[1]).contiguous()
+    if _fast(x):
+        return ext().head_scale_cast(x, e, dtype)
+    return (x.float() * torch.ldexp(torch.ones_like(e, dtype=torch.float32), e)[..., None, None]).to(dtype)
+
+
+def prepare_qkv(q, k, v):
+    """Scaled fp16 copies of q, k, v and the exponents to undo them: (q16, k16, v16, a, ev)."""
+    eq, ek = head_exp(q).amax(), head_exp(k).amax()
+    # After scaling, the maxima are 2**(eq+a) and 2**(ek-a); put both at ~2**((eq+ek)/2),
+    # keeping them at most 2**14 so q.k products stay inside fp16 inputs.
+    a = torch.div(ek - eq, 2, rounding_mode="floor")
+    a = torch.maximum(torch.minimum(a, 14 - eq), ek - 14)
+    ev = head_exp(v)  # v16 max in [0.5, 1): headroom for the backward pass
+    return head_scale(q, a, torch.float16), head_scale(k, -a, torch.float16), head_scale(v, -ev, torch.float16), a, ev
+
+
+def expand_heads(e, n_heads):
+    """Per-KV-head exponents -> per-query-head (GQA)."""
+    return e if e.shape[1] == n_heads else e.repeat_interleave(n_heads // e.shape[1], dim=1)
 
 
 @torch.autocast("cuda", enabled=False)
 def sdpa(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None, enable_gqa=False):
-    eq, ek = _exponent(q), _exponent(k)
-    # After scaling, the maxima are 2**(eq+a) and 2**(ek-a); put both at ~2**((eq+ek)/2),
-    # keeping them at most 2**14 so q.k products stay inside fp16 inputs.
-    a = torch.div(ek - eq, 2, rounding_mode="floor")
-    a = torch.minimum(a, 14 - eq)
-    a = torch.maximum(a, ek - 14)
-    ev = _exponent(v, dim=(-2, -1))
+    q16, k16, v16, _, ev = prepare_qkv(q, k, v)
     if attn_mask is not None and attn_mask.dtype == torch.bfloat16:
         attn_mask = attn_mask.half()
-    out = F.scaled_dot_product_attention(
-        _scale(q, a), _scale(k, -a), _scale(v, 14 - ev), attn_mask=attn_mask, dropout_p=dropout_p,
-        is_causal=is_causal, scale=scale, enable_gqa=enable_gqa)
-    if ev.shape[-3] != out.shape[-3]:  # GQA: each K/V head serves several query heads
-        ev = ev.repeat_interleave(out.shape[-3] // ev.shape[-3], dim=-3)
-    return (out.float() * torch.ldexp(torch.ones_like(ev, dtype=torch.float32), ev - 14)).to(q.dtype)
+    out = F.scaled_dot_product_attention(q16, k16, v16, attn_mask=attn_mask, dropout_p=dropout_p,
+                                         is_causal=is_causal, scale=scale, enable_gqa=enable_gqa)
+    return head_scale(out, expand_heads(ev, out.shape[1]), q.dtype)
