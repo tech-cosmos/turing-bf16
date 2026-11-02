@@ -23,12 +23,28 @@ On a 2080 Ti: GEMMs 6-8x faster than torch bf16, attention 5-7x faster with ~10x
 memory, and LLM prefill 3-6x faster with the same accuracy as native bf16. See
 [RESULTS.md](RESULTS.md).
 
+Convolutions are converted too, so diffusers pipelines work end to end:
+
+```python
+pipe = DiffusionPipeline.from_pretrained(name, torch_dtype=torch.bfloat16).to("cuda")
+tbf16.convert(pipe)  # every bf16 Linear and Conv on the GPU (transformer, VAE, ...), plus SDPA
+```
+
+Wan2.1 1.3B runs 5-5.6x faster per step than native bf16, within 8% of fp16, and
+generates the default 81x480x832 video, where native bf16 runs out of memory. Its VAE
+decodes at fp16 speed, where the native bf16 VAE is 4.5x slower or OOMs. Sana's VAE does
+not run in native bf16 on Turing at all. The output matches native bf16 (same error vs
+fp32). The middle frame of a Wan2.1 video, 17x480x832, 20 steps, same seed:
+
+![Wan2.1 middle frame: fp32, bf16, tbf16, fp16](docs/images/wan2.1_17x480x832.png)
+
 Status: early research, inference only. Not published yet.
 
 ## Layout
 
 - `tbf16/ops.py`: scaled linear (CUDA quantize/epilogue + cuBLAS fp16), Triton fallbacks
 - `tbf16/attention.py`: scaled SDPA on torch's fp16 memory-efficient kernel
-- `tbf16/convert.py`: `convert(model)`; `tbf16/patch.py`: `patch()` context manager
+- `tbf16/conv.py`: scaled Conv1d/2d/3d on fp16 cuDNN kernels
+- `tbf16/convert.py`: `convert(model or pipeline)`; `tbf16/patch.py`: `patch()` context manager
 - `tbf16/csrc/`: CUDA kernels (JIT-built for sm_75 on first use)
 - `bench/`, `tests/`: benchmarks and accuracy checks
