@@ -15,7 +15,8 @@ from torch.utils.weak import WeakIdKeyDictionary
 from .attention import sdpa
 from .ops import prepare_weight, scaled_linear
 
-# Below this many rows the GEMM is memory bound and native bf16 is as fast.
+# Fewer query rows than this (decoding) run attention natively: it is as fast and skips
+# the scaling kernels. Linear layers with a single row run natively too (memory bound).
 MIN_ROWS = 16
 
 
@@ -39,7 +40,7 @@ class TuringBF16Mode(TorchFunctionMode):
             x, w = args[0], args[1]
             b = args[2] if len(args) > 2 else kwargs.get("bias")
             if _ok(x, w) and not torch.is_grad_enabled():
-                if x.numel() // x.shape[-1] >= self.min_rows:
+                if x.numel() // x.shape[-1] >= 2:
                     self.stats["linear"] += 1
                     return scaled_linear(x, *self._weight(w), b)
                 self.stats["linear_native"] += 1
