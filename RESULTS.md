@@ -304,6 +304,91 @@ Norms, GELU and RoPE are memory bound and were not bottlenecks.
 - `convert()` only converts modules that are already on the GPU, so it does not combine
   with `enable_model_cpu_offload()`.
 
+## Tesla T4 (Modal, `bench/modal_app.py`)
+
+Data-center Turing: 16 GB, 70 W cap, fp16 tensor cores at full rate with fp32 accumulation.
+torch 2.15 / CUDA 13.2, driver 610. The full test suite passes.
+
+Dense GEMM, TFLOPS (`bench/baseline.py`, `bench/linear.py --cool`). torch's bf16 path is even
+slower here than on the 2080 Ti:
+
+| (M, K, N) | torch bf16 | fp32 | tbf16 | fp16 (cuBLAS) | speedup |
+|---|---|---|---|---|---|
+| 4096, 4096, 4096 | 2.9 | 4.2 | 28.3 | 31.2 | 9.9x |
+| 8192, 3072, 12288 | 2.9 | 4.0 | 24.5 | 26.0 | 8.4x |
+| 16384, 5120, 5120 | 2.9 | 4.0 | 25.6 | 23.9 | 8.9x |
+| 512, 4096, 4096 | 3.0 | | 30.4 | 30.0 | 10.2x |
+| 64, 4096, 11008 | 3.0 | | 11.2 | 11.3 | 3.8x |
+| 1, 4096, 4096 | 0.23 | | 0.24 | 0.23 | 1.05x |
+
+The T4's 70 W power cap makes runs vary by ~10%.
+
+- **Attention forward:** tbf16 runs at 97-101% of fp16 SDPA (12.6-14.5 TFLOPS).
+- **Training, forward + backward:** linear layers are 8.8x faster than torch bf16, and causal
+  attention is 5.4-9.2x faster, with 0.8 GB of memory instead of 4.8 GB.
+
+LLM prefill (`bench/e2e_llm.py --ref`, fp32 reference on two more T4s):
+
+| model | 512 | 2048 | 4096 | 8192 | decode | KL vs fp32 (bf16 / tbf16) |
+|---|---|---|---|---|---|---|
+| Qwen3-1.7B | 565 -> 146 ms (3.9x) | 2605 -> 396 ms (6.6x) | 6319 -> 852 ms (7.4x) | OOM -> 1940 ms | 22.3 / 22.9 tok/s | 4.3e-4 / 4.2e-4 |
+| Gemma 3 4B | 1229 -> 208 ms (5.9x) | 5286 -> 874 ms (6.0x) | 11623 -> 2027 ms (5.7x) | | 14.9 / 14.9 tok/s | 4.6e-4 / 4.0e-4 |
+
+- **Gemma 3 4B:** `model.half()` gives NaN logits, and tbf16's greedy output is identical to
+  native bf16's.
+
+Sana 1600M (`bench/e2e_diffusion.py --model sana`, 20 steps), seconds per step:
+
+| | 1024x1024 | 2048x2048 |
+|---|---|---|
+| native bf16 | 2.24 (VAE cannot decode: no cuDNN bf16 engine) | 10.1 (same) |
+| tbf16 | 0.40 (5.6x) | 1.56 (6.5x) |
+| fp16 | 0.52 | 1.62 |
+| fp32 | 1.59 | |
+
+- **Output:** tbf16 matches native bf16 (PSNR 29.6 dB at 1024, 35.8 dB at 2048).
+- **Sana is sensitive to precision:** native bf16 itself is only 20.6 dB from fp32, while fp16 is
+  28.8 dB from fp32.
+
+Ampere check (A10G): `convert()` is a no-op with a warning, as intended. The kernels still build
+(PTX) and the tests pass. Native bf16 runs at 90 TFLOPS there against tbf16's 73.
+
+### T5-family text encoders and outlier channels (`bench/e2e_text_encoder.py`, `tests/test_outliers.py`)
+
+UMT5-XXL (Wan2.1's text encoder) and Flan-T5-XL reach activations of 3.8e5 and 4.3e5 inside the
+fp32 model, far above fp16's 65504. Encoding 8 prompts x 512 tokens on a T4:
+
+| | UMT5-XXL | Flan-T5-XL |
+|---|---|---|
+| native bf16 | 14.8 s | 4.0 s |
+| tbf16 | 2.8 s (5.3x) | 1.0 s (3.9x) |
+| fp16 (HF clamps activations) | 4.0 s | 1.2 s |
+
+Accuracy, end to end:
+- **fp16 is the most accurate**, at 3e-3 (UMT5) and 1e-3 (Flan-T5) relative error against fp32.
+  Hugging Face's T5 code clamps activations in fp16, and fp16 keeps 3 more mantissa bits than
+  bf16 between layers.
+- **Every bf16 computation lands in a noisy 2-8e-2 band on UMT5, native or tbf16.** Changing only
+  a prompt suffix moves native bf16's worst-token cosine between 0.15 and 0.77. Over four prompt
+  sets, the mean error was ~6.6e-2 for native bf16 and 5.4e-2 to 7.0e-2 for tbf16, with no
+  consistent ranking.
+- **Flan-T5 is stable:** 1.2e-2 for bf16 and 1.2-1.4e-2 for tbf16.
+
+For T5 encoders on Turing, use fp16 for accuracy and tbf16 for bf16 semantics at about fp16 speed.
+
+What this uncovered, and fixed: when a row has a few huge channels, scaling the row's max to ~1
+pushed channels 1e5x smaller into fp16 subnormals. On synthetic outlier rows, tbf16 was up to 5.8x
+worse than torch bf16 in linear layers and 57x worse in attention (an outlier channel in V).
+- **Fused GEMM:** row max is now in [2^14, 2^15). It accumulates in fp32 and writes bf16, so only
+  the fp16 inputs must fit.
+- **cuBLAS path (inference) and dX:** rows are scaled by their L1 norm into [2^14, 2^15). With
+  |w16| <= 1, the fp16 output still provably fits.
+- **Inference attention:** V's per-head max is now near 2^13. The output is a convex combination
+  of V rows, so it cannot overflow.
+
+Small-channel error now matches torch bf16. On UMT5's real block-20 `wo` inputs, every path (torch
+bf16, fused, cuBLAS) is at 1.64-1.70e-3 against fp64.
+
 ## Dead ends and notes
 
 - Triton 3.9 emits no `mma` for sm_75 (`tl.dot` falls back to FMAs, ~0.2 TFLOPS), so the

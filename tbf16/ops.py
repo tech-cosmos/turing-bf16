@@ -21,6 +21,9 @@ _USE_CUDA = os.environ.get("TBF16_BACKEND", "cuda") == "cuda"
 # or quantize + cuBLAS fp16 + epilogue. Unset, fused is used from FUSED_MIN_M rows up.
 _GEMM = os.environ.get("TBF16_GEMM", "")
 FUSED_MIN_M = 256
+# Fused GEMM row scaling: max -> [2^14, 2^15) (fp32 accumulation, bf16 output, so no overflow bound
+# beyond fp16's input range). (target exponent, scale by L1 norm instead of max)
+_FUSED_SCALE = (15, False)
 
 
 def _target_exp(K: int) -> int:
@@ -155,7 +158,8 @@ def scaled_linear(x: torch.Tensor, w16: torch.Tensor, w_sinv: torch.Tensor, bias
     if x2.shape[0] < SMALL_M:
         return small_m_linear(x2, w16, w_sinv, bias).reshape(*shape[:-1], w16.shape[0])
     if _use_fused(x2, w16, bias):  # one GEMM kernel: x converted to fp16 on the fly, bf16 out
-        return gemm_ext().linear(x2, w16, w_sinv, bias, -1).reshape(*shape[:-1], w16.shape[0])
+        t, l1 = _FUSED_SCALE
+        return gemm_ext().linear(x2, w16, w_sinv, bias, -1, t, l1).reshape(*shape[:-1], w16.shape[0])
     x16, x_sinv = quantize_rows_shared(x, l1=True)
     return linear_q(x16, x_sinv, w16, w_sinv, bias).reshape(*shape[:-1], w16.shape[0])
 

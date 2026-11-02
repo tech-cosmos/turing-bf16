@@ -56,16 +56,19 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", choices=MODELS, default="wan-umt5")
     ap.add_argument("--max-len", type=int, default=512)
+    ap.add_argument("--ref-device", default="auto", help="'cpu' for the fp32 reference, or 'auto' (other GPUs)")
+    ap.add_argument("--suffix", default="", help="appended to every prompt (to vary the inputs)")
+    ap.add_argument("--force", action="store_true", help="convert on non-Turing GPUs too (correctness checks)")
     a = ap.parse_args()
     print(a.model, torch.cuda.get_device_name(), flush=True)
 
     model, tok = load(a, torch.bfloat16)
     model.cuda()
-    t = tok(PROMPTS, padding="max_length", max_length=a.max_len, truncation=True, return_tensors="pt")
+    t = tok([p + a.suffix for p in PROMPTS], padding="max_length", max_length=a.max_len, truncation=True, return_tensors="pt")
     ids, mask = t.input_ids.cuda(), t.attention_mask.cuda()
     outs, times = {}, {}
     outs["bf16"], times["bf16"] = timed(lambda: encode(model, ids, mask))
-    tbf16.convert(model)
+    tbf16.convert(model, force=a.force)
     outs["tbf16"], times["tbf16"] = timed(lambda: encode(model, ids, mask))
     del model; torch.cuda.empty_cache(); tbf16.uninstall_sdpa()
 
@@ -75,11 +78,15 @@ def main():
     del model; torch.cuda.empty_cache()
 
     n = torch.cuda.device_count()
-    mem = {0: "0GiB", **{i: f"{int(torch.cuda.get_device_properties(i).total_memory * 0.9 / 2**30)}GiB"
-                         for i in range(1, n)}} if n > 1 else None
-    model, _ = load(a, torch.float32, device_map="auto" if mem else None, max_memory=mem)
-    if not mem:
-        model.cuda()
+    if a.ref_device == "cpu":
+        torch.set_num_threads(max(1, torch.get_num_threads()))
+        model, _ = load(a, torch.float32)
+    else:
+        mem = {0: "0GiB", **{i: f"{int(torch.cuda.get_device_properties(i).total_memory * 0.9 / 2**30)}GiB"
+                             for i in range(1, n)}} if n > 1 else None
+        model, _ = load(a, torch.float32, device_map="auto" if mem else None, max_memory=mem)
+        if not mem:
+            model.cuda()
     amax = {"value": 0.0, "where": ""}
 
     def hook(mod, inp, out):

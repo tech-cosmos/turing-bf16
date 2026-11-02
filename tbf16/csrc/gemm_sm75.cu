@@ -16,15 +16,16 @@ constexpr int BK = 32;  // k per smem stage: 64-byte rows of four 16-byte chunks
 // Exact power of two s with amax * s in [2^14, 2^15), built from exponent bits. Products are
 // accumulated in fp32 and the output is written as bf16, so only the fp16 inputs must fit; a max
 // near 2^15 keeps channels up to 2^28 smaller than it out of fp16's subnormals (T5-style outliers).
-__device__ __forceinline__ float pow2_scale(float amax) {
+__device__ __forceinline__ float pow2_scale(float amax, int t) {
   int e = (__float_as_int(amax) >> 23) & 0xFF;
   e = min(max(e, 1), 252);
-  return __int_as_float(min(268 - e, 254) << 23);
+  return __int_as_float(min(253 + t - e, 254) << 23);
 }
 
-// s_inv[r] = 1 / pow2_scale(max |x[r, :]|). One warp per row. K % 8 == 0, 16-byte aligned rows.
+// s_inv[r] = 1 / pow2_scale(max |x[r, :]| (or its L1 norm), t). One warp per row. K % 8 == 0,
+// 16-byte aligned rows.
 __global__ void row_scale_kernel(const __nv_bfloat16* __restrict__ x, float* __restrict__ s_inv, int M, int K,
-                                 int64_t ld) {
+                                 int64_t ld, int t, bool l1) {
   const int row = blockIdx.x * (blockDim.x / 32) + (threadIdx.x >> 5), lane = threadIdx.x & 31;
   if (row >= M) return;
   const uint4* xr = reinterpret_cast<const uint4*>(x + row * ld);
@@ -35,11 +36,14 @@ __global__ void row_scale_kernel(const __nv_bfloat16* __restrict__ x, float* __r
 #pragma unroll
     for (int j = 0; j < 4; ++j) {
       float2 f = __bfloat1622float2(h[j]);
-      amax = fmaxf(amax, fmaxf(fabsf(f.x), fabsf(f.y)));
+      amax = l1 ? amax + fabsf(f.x) + fabsf(f.y) : fmaxf(amax, fmaxf(fabsf(f.x), fabsf(f.y)));
     }
   }
-  for (int o = 16; o > 0; o >>= 1) amax = fmaxf(amax, __shfl_xor_sync(0xffffffff, amax, o));
-  if (lane == 0) s_inv[row] = 1.f / pow2_scale(amax);
+  for (int o = 16; o > 0; o >>= 1) {
+    const float other = __shfl_xor_sync(0xffffffff, amax, o);
+    amax = l1 ? amax + other : fmaxf(amax, other);
+  }
+  if (lane == 0) s_inv[row] = 1.f / pow2_scale(amax, t);
 }
 
 // Byte offset of 16-byte chunk c of row r in a [rows][BK] fp16 tile. Two rows share a 128-byte
@@ -236,21 +240,22 @@ void launch(const torch::Tensor& x, const torch::Tensor& s, const torch::Tensor&
 
 }  // namespace
 
-torch::Tensor row_scale(torch::Tensor x) {
+torch::Tensor row_scale(torch::Tensor x, int64_t t, bool l1) {
   TORCH_CHECK(x.is_cuda() && x.scalar_type() == at::kBFloat16 && x.dim() == 2 && x.stride(1) == 1);
   const int64_t M = x.size(0), K = x.size(1);
   TORCH_CHECK(K % 8 == 0 && x.stride(0) % 8 == 0 && aligned16(x), "row_scale: K and row stride must be multiples of 8");
   auto s_inv = torch::empty({M}, x.options().dtype(at::kFloat));
   if (M == 0) return s_inv;
   row_scale_kernel<<<(M + 7) / 8, 256, 0, c10::cuda::getCurrentCUDAStream()>>>(
-      reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()), s_inv.data_ptr<float>(), (int)M, (int)K, x.stride(0));
+      reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()), s_inv.data_ptr<float>(), (int)M, (int)K, x.stride(0),
+      (int)t, l1);
   return s_inv;
 }
 
 // y = x @ w16^T * ws + bias for bf16 x (M, K), fp16 w16 (N, K) with fp32 inverse scales ws (N,).
 // cfg selects the tile shape (-1: by size).
 torch::Tensor linear(torch::Tensor x, torch::Tensor w16, torch::Tensor ws, c10::optional<torch::Tensor> bias,
-                     int64_t cfg) {
+                     int64_t cfg, int64_t t, bool l1) {
   TORCH_CHECK(w16.is_cuda() && w16.scalar_type() == at::kHalf && w16.dim() == 2 && w16.stride(1) == 1);
   TORCH_CHECK(ws.is_contiguous() && ws.scalar_type() == at::kFloat && ws.numel() == w16.size(0));
   const int64_t M = x.size(0), K = x.size(1), N = w16.size(0);
@@ -258,7 +263,7 @@ torch::Tensor linear(torch::Tensor x, torch::Tensor w16, torch::Tensor ws, c10::
   if (bias)
     TORCH_CHECK(bias->is_contiguous() && bias->scalar_type() == at::kBFloat16 && bias->numel() == N &&
                 reinterpret_cast<uintptr_t>(bias->data_ptr()) % 4 == 0);
-  auto s = row_scale(x);
+  auto s = row_scale(x, t, l1);
   auto y = torch::empty({M, N}, x.options());
   if (M == 0 || N == 0) return y;
   const __nv_bfloat16* b = bias ? reinterpret_cast<const __nv_bfloat16*>(bias->data_ptr()) : nullptr;
