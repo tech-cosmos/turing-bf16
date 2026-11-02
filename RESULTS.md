@@ -40,11 +40,21 @@ The remaining ~10% to the fp16 ceiling is the separate quantize and epilogue pas
 
 ## Attention (`tests/test_attention.py`)
 
+Forward, with the fused per-head amax and scale-cast kernels:
+
 | (B, H, S, D) | torch bf16 | tbf16 | fp16 ceiling |
 |---|---|---|---|
-| 1, 24, 4096, 128 | 5.1 TFLOPS, 3.9 GB | 26.6 TFLOPS, 0.5 GB | 31.3 |
-| 1, 12, 8192, 128 | 4.1 TFLOPS, 7.3 GB | 29.5 TFLOPS, 0.5 GB | 32.3 |
-| 1, 24, 16384, 64 | OOM | 31.9 TFLOPS, 0.7 GB | 33.4 |
+| 1, 24, 4096, 128 | 5.1 TFLOPS, 3.9 GB | 30.6 TFLOPS, 0.5 GB | 31.4 |
+| 1, 12, 8192, 128 | 4.1 TFLOPS, 7.3 GB | 31.8 TFLOPS, 0.5 GB | 32.4 |
+| 1, 24, 16384, 64 | OOM | 33.0 TFLOPS, 0.7 GB | 33.2 |
+| 4, 32, 2048, 128 | 5.0 TFLOPS, 5.4 GB | 28.4 TFLOPS, 0.8 GB | 29.5 |
+
+Forward + backward, causal (`tests/test_autograd.py`):
+
+| (H, S, D) | torch bf16 | tbf16 |
+|---|---|---|
+| 16, 2048, 128 | 17.3 ms, 1.78 GB | 5.5 ms, 0.82 GB (3.2x) |
+| 16, 4096, 64 | 52.6 ms, 4.78 GB | 7.6 ms, 0.82 GB (6.9x) |
 
 ## Accuracy
 
@@ -84,6 +94,47 @@ Greedy generation identical to native bf16 over 128 tokens.
 15.3 vs 14.9 tok/s.
 
 KL vs fp32 for tbf16 is within run-to-run spread of native bf16 on all three models.
+
+## Training (`bench/train_llm.py`, `tests/test_autograd.py`)
+
+`tbf16.convert(model, train=True)`. Gradients (dX, dW, db, dQ, dK, dV, with GQA and
+bool/float masks) match torch's bf16 autograd against an fp64 reference, including
+gradients scaled by 1e-12 (fp16 would flush them to zero) and by 1e8. Linear fwd+bwd runs
+at 48-50 TFLOPS against torch bf16's 8 (6.0-6.4x).
+
+Recipes, same init and same batches, two runs at a time on the 2080 Tis
+(raw data: `results/train_final.jsonl`):
+
+- **bf16**: fp32 master weights + `torch.autocast(bf16)`, the usual bf16 mixed precision.
+- **bf16+tbf16**: the same, after `tbf16.convert(model, train=True)`.
+- **fp16-amp**: fp32 master + `autocast(fp16)` + `GradScaler`, the usual Turing recipe.
+
+| task | bf16 | bf16+tbf16 | fp16-amp | fp32 | eval loss (bf16 / tbf16 / fp16) |
+|---|---|---|---|---|---|
+| 75M byte-level LM from scratch, 4 x 1024 tokens | 527 ms, 6.16 GB | 218 ms (2.4x), 3.35 GB | 142 ms, 3.27 GB | 347 ms | 1.8183 / 1.8167 / 1.8168 |
+| LoRA r=16 all-linear, Qwen3-1.7B, 2 x 512, grad ckpt | 2251 ms | 862 ms (2.6x) | 530 ms | | 1.4524 / 1.4528 / 1.4523 |
+| LoRA r=16 all-linear, Gemma 3 1B, 2 x 512, grad ckpt | 1323 ms | 868 ms (1.5x) | 639 ms, 2 skipped steps | | 1.7221 / 1.7223 / 1.7216 |
+
+![from-scratch loss curves](docs/images/train_scratch.png)
+![LoRA loss curves](docs/images/train_lora_qwen.png)
+
+Honest reading: tbf16 gives bf16 training semantics (no loss scaling, no skipped steps, no
+overflow) at 1.5-2.6x the speed of native bf16, with matching loss curves. When a model
+trains fine in fp16 (both models above do at this scale), fp16 AMP is still 1.4-1.6x faster.
+The gap is mostly host overhead: at these small batches the step is CPU bound on pentek5's
+2.2 GHz Xeons (LoRA: 970 ms wall vs 563 ms of GPU kernels for tbf16, 551 vs 392 for fp16),
+and tbf16 launches more kernels per layer. Larger batches shrink the gap.
+
+What made the difference while building this:
+- Attention backward must keep its tensors in `save_for_backward` (calling torch's
+  efficient-attention ops directly). An earlier version kept an inner autograd graph on
+  `ctx`, which activation checkpointing could not drop: ~0.7 GB leaked per step and each
+  layer was recomputed twice (1118 -> 862 ms/step once fixed).
+- Q/K/V and gate/up share one quantized copy of their input (3x/2x less memory for those
+  saved activations).
+- LoRA adapters (rank 16) are skinny GEMMs where torch's bf16 path is ~20x slower than it
+  should be (`magma_sgemmEx`, ~115 ms/step). They now run as fp32 SGEMM.
+- Caching frozen base weights in fp16 saved only ~7% for +3.2 GB, so it was dropped.
 
 ## Dead ends and notes
 
