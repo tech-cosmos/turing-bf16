@@ -6,7 +6,8 @@ same accuracy as native bf16. Inference and training.
 
 ```python
 import tbf16
-tbf16.convert(model)               # inference
+tbf16.convert(model)               # inference (transformers models, any nn.Module)
+tbf16.convert(pipe)                # diffusers pipelines
 tbf16.convert(model, train=True)   # training / LoRA fine-tuning
 ```
 
@@ -18,11 +19,14 @@ On an RTX 2080 Ti, compared with running the same bf16 model in plain PyTorch:
 | Attention, 4–16k tokens | 4–5 TFLOPS, 4–7 GB, OOM at 16k | **28–33 TFLOPS, <1 GB** |
 | Gemma 3 4B prompt processing (2048 tokens) | 2084 ms | **484 ms (4.3x)**; `model.half()` gives NaN |
 | Qwen3-1.7B prompt processing (4096 tokens) | 2455 ms | **423 ms (5.8x)** |
+| Wan2.1 1.3B video, s/denoising step (17x320x512) | 3.72 s | **0.74 s (5.0x)**; 81x480x832 runs (native OOMs) |
+| bf16 conv layers (VAEs) | 6–8x slower than fp16, some unsupported | **fp16 speed** |
 | Training, matching loss curves | 1x | **1.5–2.6x** |
 
 Full numbers, methods and negative results: [RESULTS.md](RESULTS.md).
 
-> Status: research code, tested on RTX 2080 Ti (sm_75) with torch 2.15 / CUDA 13.2. Not yet
+> Status: research code. Benchmarked on RTX 2080 Ti (sm_75) with torch 2.15 / CUDA 13.2. The
+> test suite also passes on an RTX A5000 (torch 2.11 / CUDA 12.8, `force=True`). Not yet
 > tested on T4, other Turing cards or V100. Linux only.
 
 ## Why this exists
@@ -46,7 +50,8 @@ without overflow.
 bf16 has an 8-bit significand and fp16 has 11, so **every bf16 value converts to fp16 exactly
 as long as it is inside fp16's range**. tbf16 moves each row of activations and each row of
 weights into that range with a **power-of-two scale** (exact: it only changes the exponent),
-runs cuBLAS fp16 GEMMs with fp32 accumulation, and undoes the scales in the epilogue.
+runs fp16 tensor-core GEMMs with fp32 accumulation (a fused `mma.sync` kernel for M ≥ 256,
+cuBLAS below that), and undoes the scales in the epilogue.
 
 - **Linear layers:** one scale per activation row and per weight row. The scale target is
   chosen so the fp16 GEMM output provably cannot overflow (`|C| < K * 4^t <= 65504`).
@@ -62,7 +67,9 @@ the output (relative error ~1.7e-3 against an fp64 reference in both cases). Two
 - **Very small elements:** values more than ~2^16 smaller than their row's maximum land in
   fp16's subnormal range and keep fewer bits. Their contribution to the result is far below
   bf16 rounding.
-- **Double rounding:** the GEMM output is rounded to fp16 (11 bits) before bf16 (8 bits).
+- **Double rounding (small batches only):** for fewer than 256 rows the cuBLAS path rounds the
+  GEMM output to fp16 (11 bits) before bf16 (8 bits). From 256 rows up, a fused sm_75 kernel
+  converts bf16 to fp16 on the fly and writes bf16 straight from the fp32 accumulators.
 
 ## Install
 
@@ -128,12 +135,31 @@ Works with fp32 master weights under `autocast(bf16)`, with pure bf16 weights, w
 gradient checkpointing, and with PEFT/LoRA.
 
 ### Diffusion models (diffusers)
-<!-- DIFFUSION -->
+```python
+pipe = DiffusionPipeline.from_pretrained(name, torch_dtype=torch.bfloat16).to("cuda")
+tbf16.convert(pipe)   # every bf16 Linear and Conv on the GPU (transformer, VAE, ...), plus SDPA
+video = pipe(prompt, num_frames=81, height=480, width=832).frames[0]
+```
+Measured results:
+- **Wan2.1 T2V 1.3B:** 5–5.6x faster per step than native bf16 and within 8% of fp16. It
+  generates the default 81x480x832 video, where native bf16 runs out of memory.
+- **VAEs:** they decode at fp16 speed. Wan's native bf16 VAE is 4.5x slower or runs out of
+  memory; Sana's does not run in native bf16 on Turing at all, since cuDNN has no bf16 kernel
+  for one of its convolutions.
+- **Output:** it matches native bf16 (same error against fp32).
+
+Neither Wan2.1 nor Sana overflowed in fp16, so for those two `.half()` is also fine, and
+slightly faster.
+
+![Wan2.1 middle frame: fp32, bf16, tbf16, fp16](docs/images/wan2.1_17x480x832.png)
+
+Not supported yet: `enable_model_cpu_offload()`, because `convert` only touches modules that
+are already on the GPU.
 
 ### Lower-level API
 | Function | What it does |
 |---|---|
-| `tbf16.convert(model, train=False, sdpa=True, force=False)` | In-place conversion. A no-op with a warning on GPUs that already have bf16 (Ampere and newer) unless `force=True`. |
+| `tbf16.convert(model_or_pipeline, train=False, sdpa=True, force=False, conv=True)` | In-place conversion: Linear, Conv1d/2d/3d and SDPA. A no-op with a warning on GPUs that already have bf16 (Ampere and newer) unless `force=True`. |
 | `tbf16.is_supported_gpu()` | True on sm_70/72/75 (fp16 tensor cores, no bf16). |
 | `tbf16.prepare_weight(w)` | bf16 `(N, K)` → `(fp16 (N, K), fp32 (N,) inverse scales)`. |
 | `tbf16.scaled_linear(x, w16, w_scale, bias=None)` | `x @ W^T + b` for bf16 `x`, inference. |
@@ -154,6 +180,7 @@ Environment variables:
 | Situation | Recommendation |
 |---|---|
 | Turing GPU, bf16 model, prompt processing / batch inference / diffusion | **Use tbf16.** This is where the 3–8x is. |
+| Turing GPU, model known to be fp16-safe (e.g. Wan2.1, Sana, Qwen3) | `.half()` works and is 0–15% faster; tbf16 is the safe default when you don't know. |
 | Turing GPU, bf16 model that overflows in fp16 (Gemma 3, many DiTs) | **Use tbf16.** `.half()` breaks; fp32 is 2x memory and slow. |
 | Turing GPU, single-stream token-by-token decoding | Same speed as native; it is memory bound either way. |
 | Turing GPU, training a model that is known to be fp16-safe | fp16 AMP + GradScaler is still 1.4–1.6x faster than tbf16 at small batch. tbf16 gives bf16 semantics (no loss scaling, no skipped steps) at 1.5–2.6x native bf16. |
@@ -173,15 +200,17 @@ If a user asks you to run a bf16 model on a Turing GPU (RTX 20xx, T4, Quadro RTX
    model (expect a relative difference around 1e-3, and the same greedy tokens for most
    prompts).
 5. Things that are not handled, and just run natively: non-SDPA attention implementations
-   (eager attention with manual matmuls), `torch.compile`/CUDA graphs (untested), conv layers,
-   and head dims above 256.
+   (eager attention with manual matmuls), `torch.compile`/CUDA graphs (untested), and head
+   dims above 256. Call `convert` after moving the model or pipeline to CUDA; CPU offloading
+   is not supported.
 
 To change the library itself, read [AGENTS.md](AGENTS.md).
 
 ## Limitations
 - **Tested on one GPU model.** Only an RTX 2080 Ti, with torch 2.15 / CUDA 13.2, has been tested.
-- **Linear and SDPA only.** Convolutions (e.g. VAEs), eager-mode attention and custom matmuls
-  (`torch.matmul`/`einsum` in model code) run natively.
+- **Linear, Conv and SDPA only.** Eager-mode attention and custom matmuls
+  (`torch.matmul`/`einsum` in model code) run natively. Convs are inference only, and depthwise
+  convs are slightly slower than native (still converted, because native can fail outright).
 - **Attention needs 4D inputs** (B, H, S, D) with head dim ≤ 256. Single-query decode steps run
   natively because they are just as fast.
 - **Training has more launch overhead than fp16 AMP.** The gap is largest at small batches on
@@ -198,8 +227,8 @@ The exactness of bf16 → fp16 inside fp16's range, and power-of-two scaling, ar
 - **DeepSeek-V3, OCP MX and Transformer Engine** use power-of-two block scales for low-precision
   formats.
 
-What tbf16 adds is a general, calibration-free drop-in for linear layers and SDPA, for
-inference and training, with end-to-end measurements. See
+What tbf16 adds is a general, calibration-free drop-in for linear layers, convolutions and
+SDPA, for inference and training, with end-to-end measurements. See
 [docs/RELATED_WORK.md](docs/RELATED_WORK.md) for the full survey.
 
 ## License

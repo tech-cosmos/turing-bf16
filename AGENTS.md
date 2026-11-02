@@ -14,6 +14,7 @@ scales are powers of two built from exponent bits, never `exp2`/`log2` approxima
 | `tbf16/ops.py` | `quantize_rows`, `prepare_weight`, `scaled_linear` (inference GEMM), Triton fallbacks, small-M GEMV routing |
 | `tbf16/attention.py` | `prepare_qkv`, `head_exp`, `head_scale`, inference `sdpa` |
 | `tbf16/autograd.py` | training: `ScaledLinearFn`, `ScaledSDPAFn` (torch efficient-attention ops), `FP32LinearFn`, `quantize_cols` |
+| `tbf16/conv.py` | scaled Conv1d/2d/3d on fp16 cuDNN (inference) |
 | `tbf16/convert.py` | `convert(model, train=...)`, `Linear` (inference), `TrainLinear`, SDPA routing |
 | `tbf16/patch.py` | `patch()` TorchFunctionMode (convenience; caches an fp16 weight copy) |
 | `tbf16/csrc/*.cu` | CUDA kernels, JIT-built by `tbf16/_ext.py` for sm_75 |
@@ -38,6 +39,9 @@ python -m tests.test_ops             # linear: CUDA vs Triton backends, edge sha
 python -m tests.test_accuracy        # linear vs fp64, outliers, tiny/huge values
 python -m tests.test_attention       # inference attention accuracy + speed
 python -m tests.test_autograd        # gradients vs fp64 (linear, attention, GQA, masks)
+python -m tests.test_conv            # scaled convs vs fp64
+python -m tests.test_sdpa_api        # SDPA keyword args, masks, strides, head dims
+python -m bench.e2e_diffusion --help # diffusers end to end (Wan2.1, Sana)
 python -m bench.linear               # GEMM TFLOPS per shape
 python -m bench.e2e_llm --ref        # HF LLM end to end (needs 2 GPUs for the fp32 reference)
 python -m bench.train_llm --recipe bf16+tbf16   # training recipe comparison

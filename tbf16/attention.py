@@ -43,7 +43,8 @@ def prepare_qkv(q, k, v):
     a = torch.div(ek - eq, 2, rounding_mode="floor")
     a = torch.maximum(torch.minimum(a, 14 - eq), ek - 14)
     ev = head_exp(v)  # v16 max in [0.5, 1): headroom for the backward pass
-    return head_scale(q, a, torch.float16), head_scale(k, -a, torch.float16), head_scale(v, -ev, torch.float16), a, ev
+    q16, k16, v16 = head_scale(q, a, torch.float16), head_scale(k, -a, torch.float16), head_scale(v, -ev, torch.float16)
+    return q16, k16, v16, a, ev
 
 
 def expand_heads(e, n_heads):
@@ -54,8 +55,8 @@ def expand_heads(e, n_heads):
 @torch.autocast("cuda", enabled=False)
 def sdpa(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None, enable_gqa=False):
     q16, k16, v16, _, ev = prepare_qkv(q, k, v)
-    if attn_mask is not None and attn_mask.dtype == torch.bfloat16:
-        attn_mask = attn_mask.half()
+    if attn_mask is not None and attn_mask.is_floating_point() and attn_mask.dtype != torch.float16:
+        attn_mask = attn_mask.half()  # additive masks must match q's dtype; large negatives become -inf
     out = F.scaled_dot_product_attention(q16, k16, v16, attn_mask=attn_mask, dropout_p=dropout_p,
                                          is_causal=is_causal, scale=scale, enable_gqa=enable_gqa)
     return head_scale(out, expand_heads(ev, out.shape[1]), q.dtype)

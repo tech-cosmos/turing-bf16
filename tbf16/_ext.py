@@ -47,7 +47,9 @@ def _load(name, src):
         os.environ["PATH"] = bindir + os.pathsep + os.environ.get("PATH", "")
     from torch.utils.cpp_extension import load
     return load(name=name, sources=[str(_HERE / "csrc" / src)], extra_ldflags=_ldflags(),
-                extra_cuda_cflags=["-O3", "-gencode=arch=compute_75,code=sm_75", "--use_fast_math"],
+                # sm_75 SASS plus PTX, so the kernels also JIT on newer GPUs (convert(..., force=True)).
+                extra_cuda_cflags=["-O3", "-gencode=arch=compute_75,code=sm_75",
+                                   "-gencode=arch=compute_75,code=compute_75", "--use_fast_math"],
                 verbose=bool(os.environ.get("TBF16_VERBOSE")))
 
 

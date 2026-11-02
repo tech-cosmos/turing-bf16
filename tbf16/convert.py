@@ -1,10 +1,12 @@
 """Convert a bf16 model in place for Turing.
 
     tbf16.convert(model)               # inference
+    tbf16.convert(pipe)                # diffusers pipeline: every nn.Module component
     tbf16.convert(model, train=True)   # training / fine-tuning (also after PEFT/LoRA wrapping)
 
 Inference: every bf16 nn.Linear becomes a tbf16.Linear holding its weight as fp16 plus
-one exact power-of-two scale per output row (same memory as bf16, same values).
+one exact power-of-two scale per output row (same memory as bf16, same values), and every
+bf16 nn.Conv1d/2d/3d runs on fp16 cuDNN kernels the same way (tbf16/conv.py).
 Training: every nn.Linear becomes a tbf16.TrainLinear (an nn.Linear subclass, same
 parameters) whose forward and backward run on fp16 tensor cores for bf16 inputs.
 Both route F.scaled_dot_product_attention to tbf16's scaled attention for bf16 inputs.
@@ -18,6 +20,7 @@ import torch.nn.functional as F
 
 from . import autograd
 from .attention import sdpa
+from .conv import convert_conv, convertible
 from .ops import prepare_weight, scaled_linear
 
 # Train mode: linear layers with in or out features below this run in fp32 (cuBLAS SGEMM).
@@ -73,7 +76,8 @@ class TrainLinear(nn.Linear):
 _native_sdpa = F.scaled_dot_product_attention
 
 
-def _sdpa(q, k, v, *args, **kwargs):
+def _sdpa(query, key, value, *args, **kwargs):  # torch's parameter names: callers pass them as keywords
+    q, k, v = query, key, value
     if q.is_cuda and torch.is_autocast_enabled("cuda") and torch.get_autocast_dtype("cuda") == torch.bfloat16:
         q, k, v = q.to(torch.bfloat16), k.to(torch.bfloat16), v.to(torch.bfloat16)  # what autocast would do
     if (q.dtype == k.dtype == v.dtype == torch.bfloat16 and q.is_cuda and q.dim() == 4 and q.shape[-1] <= 256
@@ -101,12 +105,20 @@ def is_supported_gpu(device=None) -> bool:
     return torch.cuda.get_device_capability(device) in ((7, 0), (7, 2), (7, 5))
 
 
-def convert(model: nn.Module, train: bool = False, sdpa: bool = True, force: bool = False):
-    """Convert in place and return the model. A no-op (with a warning) on GPUs that already
-    have bf16 tensor cores, unless force=True."""
+def convert(model, train: bool = False, sdpa: bool = True, force: bool = False, conv: bool = True):
+    """Convert in place and return the model (an nn.Module or a diffusers pipeline). A no-op
+    (with a warning) on GPUs that already have bf16 tensor cores, unless force=True.
+    conv: also convert bf16 Conv1d/2d/3d (inference only)."""
     if not force and not is_supported_gpu():
         warnings.warn("tbf16.convert: this GPU is not Volta/Turing; leaving the model unchanged "
                       "(native bf16 is already fast here). Pass force=True to convert anyway.")
+        return model
+    if not isinstance(model, nn.Module) and isinstance(getattr(model, "components", None), dict):
+        for c in model.components.values():
+            if isinstance(c, nn.Module):
+                convert(c, train=train, sdpa=False, force=force, conv=conv)
+        if sdpa:
+            install_sdpa()
         return model
     if train:
         for mod in model.modules():
@@ -127,6 +139,8 @@ def convert(model: nn.Module, train: bool = False, sdpa: bool = True, force: boo
                     and owners[id(child.weight)] == 1):
                 setattr(mod, cname, Linear(child))
                 child.weight = None  # free the bf16 copy now, not when convert() returns
+            elif conv and convertible(child) and owners[id(child.weight)] == 1:
+                convert_conv(child)
     torch.cuda.empty_cache()
     if sdpa:
         install_sdpa()
