@@ -1,0 +1,29 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="style.css">
+<style>
+h1 { font-size: 80px; }
+h1 .q { color: var(--text-secondary); }
+.term { margin-top: 44px; background: #0f0f0e; border: 1px solid var(--rule); border-radius: 16px; overflow: hidden; }
+.bar { height: 44px; background: #222220; display: flex; align-items: center; gap: 10px; padding: 0 18px; }
+.bar i { width: 13px; height: 13px; border-radius: 50%; background: #3c3c38; display: inline-block; }
+.bar span { margin-left: 14px; font-size: 17px; color: var(--text-muted); font-family: "JetBrains Mono", "SF Mono", Menlo, monospace; }
+pre { font-family: "JetBrains Mono", "SF Mono", Menlo, monospace; font-size: 32px; line-height: 1.6; padding: 30px 38px 34px; color: var(--text-primary); }
+.p { color: var(--text-muted); }
+.out { color: #7fd48a; }
+.c { color: var(--text-secondary); }
+.x, .ok { display: inline-block; width: 26px; text-align: center; font-weight: 800; }
+.x { color: var(--bf16); } .ok { color: var(--tbf16); }
+.hl { color: var(--tbf16); font-weight: 600; }
+.sub { font-size: 28px; margin-top: 20px; }
+</style></head><body class="viz-root"><div class="card">
+<h1>My GPU <span class="q">“supports”</span> bf16.</h1>
+<div class="sub">This repo came out of frustration: our lab server is full of RTX 2080 Tis, and every new model ships in bf16.</div>
+<div class="term"><div class="bar"><i></i><i></i><i></i><span>python · RTX 2080 Ti</span></div>
+<pre><span class="p">&gt;&gt;&gt;</span> torch.cuda.is_bf16_supported()
+<span class="out">True</span>
+<span class="p">&gt;&gt;&gt;</span> model.bfloat16()           <span class="x">✕</span><span class="c"> 7.6 TFLOPS. Slower than fp32.</span>
+<span class="p">&gt;&gt;&gt;</span> model.half()               <span class="x">✕</span><span class="c"> Gemma 3 4B: NaN</span>
+<span class="p">&gt;&gt;&gt;</span> model.float()              <span class="x">✕</span><span class="c"> 2× the memory, 13 TFLOPS</span>
+<span class="p">&gt;&gt;&gt;</span> <span class="hl">tbf16.convert(model)</span>       <span class="ok">✓</span><span class="c"> 52 TFLOPS, same output as bf16</span></pre>
+</div>
+<div class="foot"><span>turing-bf16: run bf16 models on fp16 tensor cores, exactly. RTX 20xx · T4 · Quadro RTX · TITAN RTX</span><b>Thread ↓</b></div>
+</div></body></html>
