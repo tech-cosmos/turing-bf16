@@ -1,15 +1,33 @@
 [project]
 name = "turing-bf16"
-version = "0.0.1"
-description = "Fast bf16 matmuls and attention on GPUs without bf16 tensor cores (Turing)"
+version = "0.1.0"
+description = "Run bf16 PyTorch models on fp16 tensor cores (Turing: RTX 20xx, T4, Quadro RTX), with bf16 accuracy"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Shivam Raj" }]
 requires-python = ">=3.10"
 dependencies = ["torch>=2.6", "triton", "ninja"]
+keywords = ["bf16", "bfloat16", "fp16", "turing", "t4", "rtx-2080-ti", "tensor-cores", "pytorch", "cuda"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Environment :: GPU :: NVIDIA CUDA",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 
 [project.optional-dependencies]
-bench = ["transformers", "accelerate"]
+bench = ["transformers", "accelerate", "peft", "diffusers", "matplotlib"]
+
+[project.urls]
+Homepage = "https://github.com/tech-cosmos/turing-bf16"
+Results = "https://github.com/tech-cosmos/turing-bf16/blob/main/RESULTS.md"
 
 [build-system]
-requires = ["setuptools>=64"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]

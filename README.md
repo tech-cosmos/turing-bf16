@@ -24,7 +24,7 @@ Compared with running the same bf16 model in plain PyTorch:
 | UMT5-XXL text encoder (Wan's), 8 x 512 tokens | | 14.8 → **2.8 s (5.3x)** |
 | Training, matching loss curves | **1.5–2.6x** | linear/attention fwd+bwd **5.4–9.2x** |
 
-Full numbers, methods and negative results: [RESULTS.md](RESULTS.md).
+Full numbers, methods and negative results: [RESULTS.md](https://github.com/tech-cosmos/turing-bf16/blob/main/RESULTS.md).
 
 > Status: research code. Benchmarked on RTX 2080 Ti and Tesla T4 (sm_75) with torch 2.15 /
 > CUDA 13.2. The test suite also passes on an RTX A5000 and an A10G (Ampere, `force=True`), where
@@ -82,7 +82,7 @@ Requirements:
   slower for small batches.
 
 ```bash
-pip install git+https://github.com/tech-cosmos/turing-bf16.git   # (repo is private for now)
+pip install turing-bf16
 
 # nvcc matching your torch build, if you don't have a CUDA toolkit. For CUDA 13 builds of torch
 # (the PyPI default), pip wheels work; pin all three to torch's CUDA version:
@@ -154,7 +154,7 @@ Measured results:
 Neither Wan2.1 nor Sana overflowed in fp16, so for those two `.half()` is also fine, and
 slightly faster.
 
-![Wan2.1 middle frame: fp32, bf16, tbf16, fp16](docs/images/wan2.1_17x480x832.png)
+![Wan2.1 middle frame: fp32, bf16, tbf16, fp16](https://raw.githubusercontent.com/tech-cosmos/turing-bf16/main/docs/images/wan2.1_17x480x832.png)
 
 Not supported yet: `enable_model_cpu_offload()`, because `convert` only touches modules that
 are already on the GPU.
@@ -208,7 +208,7 @@ If a user asks you to run a bf16 model on a Turing GPU (RTX 20xx, T4, Quadro RTX
    dims above 256. Call `convert` after moving the model or pipeline to CUDA; CPU offloading
    is not supported.
 
-To change the library itself, read [AGENTS.md](AGENTS.md).
+To change the library itself, read [AGENTS.md](https://github.com/tech-cosmos/turing-bf16/blob/main/AGENTS.md).
 
 ## Limitations
 - **Tested on one GPU model.** Only an RTX 2080 Ti, with torch 2.15 / CUDA 13.2, has been tested.
@@ -233,7 +233,11 @@ The exactness of bf16 → fp16 inside fp16's range, and power-of-two scaling, ar
 
 What tbf16 adds is a general, calibration-free drop-in for linear layers, convolutions and
 SDPA, for inference and training, with end-to-end measurements. See
-[docs/RELATED_WORK.md](docs/RELATED_WORK.md) for the full survey.
+[docs/RELATED_WORK.md](https://github.com/tech-cosmos/turing-bf16/blob/main/docs/RELATED_WORK.md) for the full survey.
+
+## Maintenance
+Research code, provided as is. It is not actively maintained: issues and pull requests are
+welcome but may not get a response. Fork freely.
 
 ## License
-Not decided yet (private repository).
+MIT. See [LICENSE](https://github.com/tech-cosmos/turing-bf16/blob/main/LICENSE).

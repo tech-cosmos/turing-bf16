@@ -6,7 +6,8 @@ import torch
 
 
 def main():
-    print(f"torch {torch.__version__}, CUDA {torch.version.cuda}")
+    import tbf16 as _t
+    print(f"tbf16 {_t.__version__}, torch {torch.__version__}, CUDA {torch.version.cuda}")
     if not torch.cuda.is_available():
         print("FAIL: no CUDA GPU visible"); return 1
     cap = torch.cuda.get_device_capability()

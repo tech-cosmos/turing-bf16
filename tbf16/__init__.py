@@ -1,3 +1,5 @@
+__version__ = "0.1.0"
+
 from .attention import sdpa
 from . import autograd
 from .convert import Linear, TrainLinear, convert, install_sdpa, is_supported_gpu, uninstall_sdpa
