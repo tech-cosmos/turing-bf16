@@ -1,0 +1,20 @@
+.viz-root {
+  color-scheme: dark;
+  --surface-0: #121211; --surface-1: #1a1a19; --surface-2: #232321; --rule: #34342f;
+  --text-primary: #ffffff; --text-secondary: #c3c2b7; --text-muted: #8f8e86;
+  --tbf16: #3987e5;      /* categorical slot 1 (dark) */
+  --bf16: #d95926;       /* categorical slot 2 (dark) */
+  --neutral: #6f6e68; --neutral-light: #9a9990;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { width: 1600px; height: 900px; background: var(--surface-0); }
+body { font-family: "Inter", -apple-system, "SF Pro Display", "Helvetica Neue", Arial, sans-serif; color: var(--text-primary); -webkit-font-smoothing: antialiased; }
+.card { width: 1600px; height: 900px; padding: 64px 80px 48px; background: var(--surface-1); display: flex; flex-direction: column; }
+.eyebrow { font-size: 22px; letter-spacing: .08em; text-transform: uppercase; color: var(--tbf16); font-weight: 600; margin-bottom: 14px; }
+h1 { font-size: 54px; line-height: 1.08; font-weight: 700; letter-spacing: -.02em; }
+.sub { font-size: 25px; line-height: 1.4; color: var(--text-secondary); margin-top: 16px; max-width: 1380px; }
+.foot { margin-top: auto; display: flex; justify-content: space-between; font-size: 19px; color: var(--text-muted); }
+.foot b { color: var(--text-secondary); font-weight: 600; }
+code, .mono { font-family: "JetBrains Mono", "SF Mono", Menlo, monospace; }
+.legend { display: flex; gap: 28px; font-size: 20px; color: var(--text-secondary); margin-top: 26px; }
+.legend i { display: inline-block; width: 16px; height: 16px; border-radius: 4px; margin-right: 9px; vertical-align: -2px; }

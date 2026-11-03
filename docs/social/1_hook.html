@@ -1,0 +1,41 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="style.css">
+<style>
+.panels { display: flex; gap: 72px; margin-top: 44px; }
+.panel { flex: 1; }
+.panel h2 { font-size: 28px; font-weight: 650; margin-bottom: 6px; }
+.panel .note { font-size: 19px; color: var(--text-muted); margin-bottom: 22px; }
+.row { display: grid; grid-template-columns: 250px 1fr; align-items: center; height: 80px; }
+.lab { font-size: 22px; color: var(--text-secondary); }
+.lab b { color: var(--text-primary); font-weight: 600; }
+.track { position: relative; height: 44px; }
+.bar { height: 44px; border-radius: 0 4px 4px 0; display: flex; align-items: center; }
+.val { position: absolute; top: 0; height: 44px; display: flex; align-items: center; font-size: 25px; font-weight: 650; padding-left: 12px; white-space: nowrap; }
+.val small { font-weight: 500; color: var(--text-secondary); font-size: 19px; margin-left: 8px; }
+</style></head><body class="viz-root"><div class="card">
+<div class="eyebrow">turing-bf16</div>
+<h1>Your RTX 20-series / T4 runs bf16 <span style="color:var(--bf16)">slower than fp32</span></h1>
+<div class="sub">Turing tensor cores do fp16, not bf16, so PyTorch falls back to a slow path for bf16 models. tbf16 runs the same bf16 math on the fp16 tensor cores, with the same accuracy.</div>
+<div class="panels" id="panels"></div>
+<div class="legend"><span><i style="background:var(--neutral)"></i>fp32 / fp16 (reference)</span><span><i style="background:var(--bf16)"></i>bf16 in PyTorch today</span><span><i style="background:var(--tbf16)"></i>bf16 with tbf16</span></div>
+<div class="foot"><span>Dense matmul 4096×4096×4096, TFLOPS. PyTorch 2.15, CUDA 13.2.</span><b>tbf16.convert(model)</b></div>
+</div>
+<script>
+const data = [
+  { gpu: "RTX 2080 Ti", note: "Turing, 11 GB · TFLOPS, higher is better", max: 80, rows: [
+    ["fp32", 13.3, "var(--neutral)"], ["bf16 (PyTorch)", 7.6, "var(--bf16)", "slower than fp32"],
+    ["fp16 tensor cores", 56.9, "var(--neutral-light)"], ["<b>bf16 with tbf16</b>", 52.3, "var(--tbf16)", "6.9× faster"]]},
+  { gpu: "Tesla T4", note: "Turing, 16 GB (Colab, Kaggle, cloud) · TFLOPS", max: 45, rows: [
+    ["fp32", 4.2, "var(--neutral)"], ["bf16 (PyTorch)", 2.85, "var(--bf16)", "slower than fp32"],
+    ["fp16 tensor cores", 31.2, "var(--neutral-light)"], ["<b>bf16 with tbf16</b>", 28.3, "var(--tbf16)", "9.9× faster"]]},
+];
+const host = document.getElementById("panels");
+for (const p of data) {
+  const el = document.createElement("div"); el.className = "panel";
+  el.innerHTML = `<h2>${p.gpu}</h2><div class="note">${p.note}</div>` + p.rows.map(([l, v, c, extra]) => {
+    const w = v / p.max * 100;
+    return `<div class="row"><div class="lab">${l}</div><div class="track"><div class="bar" style="width:${w}%;background:${c}"></div>
+      <div class="val" style="left:${w}%">${v.toFixed(1)}${extra ? `<small>${extra}</small>` : ""}</div></div></div>`;
+  }).join("");
+  host.appendChild(el);
+}
+</script></body></html>
