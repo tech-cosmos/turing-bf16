@@ -1,17 +1,17 @@
-1/ [images: 0_lead.png, 1_hook.png]
-torch.cuda.is_bf16_supported() on a 2080 Ti says True.
+1/ [images: 3_models.png, 4_video.png]
+have an RTX 20-series, T4 or Quadro RTX? your bf16 models run slower than fp32 on these cards.
 
-then bf16 runs at 7.6 TFLOPS. fp32 does 13. the fp16 tensor cores do 57 and sit there idle.
+we made a pip package that fixes it: up to 7x faster on Qwen3, Wan2.1 video, Gemma 3 and Sana, same accuracy, no changes to your model 🧵
 
-our lab is full of these cards and every new model ships in bf16, so we got annoyed and fixed it. ~7x faster, same accuracy 🧵
 ---
-2/ [images: 2_why.png, 3_models.png, 4_video.png]
-the trick: fp16 has more precision than bf16, just less range. scale each row by a power of two (exact), run the fp16 tensor cores, undo the scale.
+2/ [images: 1_hook.png, 2_why.png]
+why: these GPUs have fast fp16 tensor cores but none for bf16, so pytorch falls back to a slow path. casting to fp16 is fast but breaks models like Gemma 3 (NaN).
 
-on a T4 vs plain pytorch bf16: qwen3 7.4x, wan2.1 6.1x, gemma 3 6x (.half() gives NaN there). training works too
+turing-bf16 runs bf16 on the fp16 cores without that problem. works for inference and fine-tuning.
+
 ---
 3/
-to be clear, it's a pytorch library, not a serving engine. if your model already works in fp16, use fp16. this is for bf16-only models, or when you're not sure.
+it's a pytorch library, not a serving engine. if your model already works in fp16, just use fp16.
 
 credit to WanGP and fp16-fixer for similar per-model tricks.
 
