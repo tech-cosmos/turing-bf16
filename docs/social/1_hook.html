@@ -14,17 +14,17 @@
 </style></head><body class="viz-root"><div class="card">
 <div class="eyebrow">turing-bf16</div>
 <h1>Your RTX 20-series / T4 runs bf16 <span style="color:var(--bf16)">slower than fp32</span></h1>
-<div class="sub">Turing tensor cores do fp16, not bf16, so PyTorch falls back to a slow path for bf16 models. tbf16 runs the same bf16 math on the fp16 tensor cores, with the same accuracy.</div>
+<div class="sub">Turing tensor cores do fp16, not bf16. tbf16 runs bf16 on them, with bf16 accuracy.</div>
 <div class="panels" id="panels"></div>
 <div class="legend"><span><i style="background:var(--neutral)"></i>fp32 / fp16 (reference)</span><span><i style="background:var(--bf16)"></i>bf16 in PyTorch today</span><span><i style="background:var(--tbf16)"></i>bf16 with tbf16</span></div>
-<div class="foot"><span>Dense matmul 4096×4096×4096, TFLOPS. PyTorch 2.15, CUDA 13.2.</span><b>tbf16.convert(model)</b></div>
+<div class="foot"><span>4096³ matmul · PyTorch 2.15</span><b>tbf16.convert(model)</b></div>
 </div>
 <script>
 const data = [
-  { gpu: "RTX 2080 Ti", note: "Turing, 11 GB · TFLOPS, higher is better", max: 80, rows: [
+  { gpu: "RTX 2080 Ti", note: "TFLOPS, higher is better", max: 80, rows: [
     ["fp32", 13.3, "var(--neutral)"], ["bf16 (PyTorch)", 7.6, "var(--bf16)", "slower than fp32"],
     ["fp16 tensor cores", 56.9, "var(--neutral-light)"], ["<b>bf16 with tbf16</b>", 52.3, "var(--tbf16)", "6.9× faster"]]},
-  { gpu: "Tesla T4", note: "Turing, 16 GB (Colab, Kaggle, cloud) · TFLOPS", max: 45, rows: [
+  { gpu: "Tesla T4", note: "TFLOPS, higher is better", max: 45, rows: [
     ["fp32", 4.2, "var(--neutral)"], ["bf16 (PyTorch)", 2.85, "var(--bf16)", "slower than fp32"],
     ["fp16 tensor cores", 31.2, "var(--neutral-light)"], ["<b>bf16 with tbf16</b>", 28.3, "var(--tbf16)", "9.9× faster"]]},
 ];

@@ -13,21 +13,21 @@
 .axis div { position: relative; height: 24px; }
 .axis span { position: absolute; transform: translateX(-50%); }
 </style></head><body class="viz-root"><div class="card">
-<div class="eyebrow">turing-bf16 · real models, one line of code</div>
-<h1>Up to 7× faster bf16 on Turing, same output</h1>
-<div class="sub">Unmodified Hugging Face and diffusers models on a Tesla T4, speedup against the same bf16 model in plain PyTorch. Outputs match native bf16.</div>
+<div class="eyebrow">turing-bf16 · one line of code</div>
+<h1>Up to 7× faster bf16 on Turing</h1>
+<div class="sub">Unmodified models on a Tesla T4, vs plain PyTorch bf16. Same accuracy.</div>
 <div class="chart" id="chart"></div>
 <div class="axis" id="axis"></div>
 <div class="legend" style="margin-top:18px"><span><i style="background:var(--tbf16)"></i>speedup with tbf16</span><span><i style="background:var(--bf16);width:4px;border-radius:1px"></i>native bf16 = 1×</span></div>
-<div class="foot" style="margin-top:auto"><span>T4 (16 GB) except LoRA training (RTX 2080 Ti). Prompt = prefill. Full numbers in RESULTS.md.</span><b class="mono">tbf16.convert(model)</b></div>
+<div class="foot" style="margin-top:auto"><span>LoRA on RTX 2080 Ti</span><b class="mono">tbf16.convert(model)</b></div>
 </div>
 <script>
 const max = 11.5;
 const rows = [
-  ["Qwen3-1.7B", "4,096-token prompt", 7.4, "8k tokens: native OOMs"],
-  ["Wan2.1 1.3B text-to-video", "per denoising step, 480p", 6.1, "81-frame video: native OOMs"],
-  ["Gemma 3 4B", "2,048-token prompt", 6.0, "model.half() gives NaN"],
-  ["Sana 1600M text-to-image", "per step, 1024×1024", 5.6, "native bf16 VAE can't decode"],
+  ["Qwen3-1.7B", "4,096-token prompt", 7.4, "native OOMs at 8k"],
+  ["Wan2.1 1.3B text-to-video", "per denoising step, 480p", 6.1, "native OOMs at 81 frames"],
+  ["Gemma 3 4B", "2,048-token prompt", 6.0, ".half() → NaN"],
+  ["Sana 1600M text-to-image", "per step, 1024×1024", 5.6, "bf16 VAE can't decode"],
   ["UMT5-XXL text encoder", "8 prompts × 512 tokens", 5.3, ""],
   ["LoRA fine-tuning, Qwen3-1.7B", "per training step", 2.6, "same loss curve"],
 ];

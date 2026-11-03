@@ -16,14 +16,14 @@ pre { font-family: "JetBrains Mono", "SF Mono", Menlo, monospace; font-size: 32p
 .sub { font-size: 28px; margin-top: 20px; }
 </style></head><body class="viz-root"><div class="card">
 <h1>My GPU <span class="q">“supports”</span> bf16.</h1>
-<div class="sub">This repo came out of frustration: our lab server is full of RTX 2080 Tis, and every new model ships in bf16.</div>
+<div class="sub">Born out of frustration: a lab full of RTX 2080 Tis, and every new model ships in bf16.</div>
 <div class="term"><div class="bar"><i></i><i></i><i></i><span>python · RTX 2080 Ti</span></div>
 <pre><span class="p">&gt;&gt;&gt;</span> torch.cuda.is_bf16_supported()
 <span class="out">True</span>
 <span class="p">&gt;&gt;&gt;</span> model.bfloat16()           <span class="x">✕</span><span class="c"> 7.6 TFLOPS. Slower than fp32.</span>
 <span class="p">&gt;&gt;&gt;</span> model.half()               <span class="x">✕</span><span class="c"> Gemma 3 4B: NaN</span>
 <span class="p">&gt;&gt;&gt;</span> model.float()              <span class="x">✕</span><span class="c"> 2× the memory, 13 TFLOPS</span>
-<span class="p">&gt;&gt;&gt;</span> <span class="hl">tbf16.convert(model)</span>       <span class="ok">✓</span><span class="c"> 52 TFLOPS, same output as bf16</span></pre>
+<span class="p">&gt;&gt;&gt;</span> <span class="hl">tbf16.convert(model)</span>       <span class="ok">✓</span><span class="c"> 52 TFLOPS, bf16 accuracy</span></pre>
 </div>
-<div class="foot"><span>turing-bf16: run bf16 models on fp16 tensor cores, exactly. RTX 20xx · T4 · Quadro RTX · TITAN RTX</span><b>Thread ↓</b></div>
+<div class="foot"><span>turing-bf16 · RTX 20xx · T4 · Quadro RTX</span><b>Thread ↓</b></div>
 </div></body></html>

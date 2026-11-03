@@ -22,25 +22,25 @@
 .steps b { color: var(--text-primary); font-weight: 600; }
 </style></head><body class="viz-root"><div class="card">
 <div class="eyebrow">turing-bf16</div>
-<h1>Running a bf16 model on Turing: three bad options</h1>
+<h1>bf16 on Turing: three bad options</h1>
 <div class="cols">
   <div>
-    <div class="opt bad"><div class="mark">✕</div><div><h3>Run bf16 as-is</h3><p>2.9 TFLOPS on a T4, slower than fp32. Attention has no fused bf16 kernel, so it builds the full S×S matrix and runs out of memory at long contexts.</p></div></div>
-    <div class="opt bad"><div class="mark">✕</div><div><h3>Cast to fp16 <code>model.half()</code></h3><p>Fast, but fp16 tops out at 65,504. Gemma 3 4B outputs NaN.</p></div></div>
-    <div class="opt bad"><div class="mark">✕</div><div><h3>Run in fp32</h3><p>Correct, but 2× the memory and only ~4 TFLOPS on a T4. This is what vLLM and ComfyUI fall back to.</p></div></div>
-    <div class="opt good"><div class="mark">✓</div><div><h3>tbf16: keep bf16, compute on fp16 tensor cores</h3><p>28 TFLOPS on a T4, no overflow, same accuracy as bf16.</p></div></div>
+    <div class="opt bad"><div class="mark">✕</div><div><h3>Run bf16 as-is</h3><p>Slower than fp32. Attention runs out of memory at long context.</p></div></div>
+    <div class="opt bad"><div class="mark">✕</div><div><h3>Cast to fp16 <code>model.half()</code></h3><p>Overflows past 65,504. Gemma 3 4B → NaN.</p></div></div>
+    <div class="opt bad"><div class="mark">✕</div><div><h3>Run in fp32</h3><p>2× the memory, still slow.</p></div></div>
+    <div class="opt good"><div class="mark">✓</div><div><h3>tbf16: bf16 on fp16 tensor cores</h3><p>~10× faster, bf16 accuracy.</p></div></div>
   </div>
   <div class="trick">
-    <h3>The trick: fp16 has <span style="color:var(--tbf16)">more</span> precision than bf16, only less range</h3>
+    <h3>fp16: <span style="color:var(--tbf16)">more</span> precision than bf16, less range</h3>
     <div class="fmt"><span class="mono">bf16</span><div class="bits"><span class="s" style="flex:1">±</span><span class="e" style="flex:8">8-bit exponent</span><span class="m" style="flex:7">7-bit mantissa</span></div></div>
     <div class="fmt"><span class="mono">fp16</span><div class="bits"><span class="s" style="flex:1">±</span><span class="e" style="flex:5">5-bit exp</span><span class="m" style="flex:10">10-bit mantissa</span></div></div>
     <ol class="steps">
-      <li>Scale each row by a <b>power of two</b>. That only changes the exponent, so it is exact.</li>
-      <li>Every bf16 value now converts to fp16 <b>losslessly</b>.</li>
-      <li>Run fp16 tensor cores with <b>fp32 accumulation</b>.</li>
-      <li>Undo the power of two. Same for attention, convs and the backward pass.</li>
+      <li>Scale each row by <b>2<sup>k</sup></b> (exact)</li>
+      <li>Convert to fp16, <b>lossless</b></li>
+      <li>fp16 tensor cores, <b>fp32 accumulate</b></li>
+      <li>Undo 2<sup>k</sup></li>
     </ol>
   </div>
 </div>
-<div class="foot"><span>T4 numbers: dense matmul 4096³, PyTorch 2.15.</span><b class="mono">tbf16.convert(model)</b></div>
+<div class="foot"><span>Tesla T4, 4096³ matmul</span><b class="mono">tbf16.convert(model)</b></div>
 </div></body></html>

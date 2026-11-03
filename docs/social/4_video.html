@@ -11,14 +11,14 @@
 .tile b { color: var(--text-primary); }
 </style></head><body class="viz-root"><div class="card">
 <div class="eyebrow">turing-bf16 · Wan2.1 1.3B on a Tesla T4</div>
-<h1>Same video frame, 6× faster</h1>
+<h1>Same video, 6× faster</h1>
 <div class="frames">
   <div class="frame"><img src="wan_17x480x832_bf16_full.png"><div class="cap"><span class="who" style="color:var(--bf16)">native bf16</span><span class="t">27.2 s<small>per step</small></span></div></div>
   <div class="frame"><img src="wan_17x480x832_tbf16_full.png"><div class="cap"><span class="who" style="color:var(--tbf16)">bf16 with tbf16</span><span class="t">4.45 s<small>per step</small></span></div></div>
 </div>
 <div class="tiles">
-  <div class="tile"><b>Full 81-frame 480p video on a 16 GB T4:</b> native bf16 runs out of memory; with tbf16 it finishes in about 14 minutes.</div>
-  <div class="tile"><b>Same output:</b> 36 dB PSNR to the native bf16 frame, and the same error against fp32 as native bf16 (9.0e-3 per denoising step).</div>
+  <div class="tile"><b>81 frames, 480p:</b> native bf16 runs out of memory · tbf16 ~14 min</div>
+  <div class="tile"><b>Same accuracy</b> as native bf16 (36 dB PSNR)</div>
 </div>
-<div class="foot"><span>Prompt "A cat walks on the grass, realistic, sunny afternoon…", 17×480×832, 20 steps, same seed. Middle frame shown.</span><b class="mono">tbf16.convert(pipe)</b></div>
+<div class="foot"><span>17×480×832, 20 steps, same seed</span><b class="mono">tbf16.convert(pipe)</b></div>
 </div></body></html>
