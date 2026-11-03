@@ -9,6 +9,7 @@
 | `1_hook.png` | bf16 on Turing is slower than fp32; tbf16 runs at fp16 speed |
 | `2_why.png` | the three bad options, and the exact power-of-two trick |
 | `3_models.png` | end-to-end speedups on real models (T4) |
+| `5_social_preview.png` | 1280x640 GitHub social preview (Settings → Social preview) |
 | `4_video.png` | Wan2.1: same frame, 6x faster |
 
 `thread.md` is the matching post text (each part under 280 characters).

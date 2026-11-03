@@ -1,0 +1,17 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="style.css">
+<style>
+html, body { width: 1280px; height: 640px; }
+.card { width: 1280px; height: 640px; padding: 64px 80px; justify-content: center; }
+h1 { font-size: 64px; line-height: 1.1; margin-top: 6px; }
+.eyebrow { font-size: 26px; }
+.cmd { margin-top: 40px; display: inline-flex; flex-direction: column; gap: 10px; background: #0f0f0e; border: 1px solid var(--rule); border-radius: 14px; padding: 22px 30px; font-family: "JetBrains Mono", "SF Mono", Menlo, monospace; font-size: 28px; align-self: flex-start; }
+.cmd .p { color: var(--text-muted); }
+.cmd .hl { color: var(--tbf16); font-weight: 600; }
+.facts { margin-top: 34px; font-size: 25px; color: var(--text-secondary); }
+.facts b { color: var(--text-primary); }
+</style></head><body class="viz-root"><div class="card">
+<div class="eyebrow">turing-bf16</div>
+<h1>bf16 at fp16 tensor-core speed<br>on Turing GPUs</h1>
+<div class="cmd"><div><span class="p">$</span> pip install turing-bf16</div><div><span class="p">&gt;&gt;&gt;</span> <span class="hl">tbf16.convert(model)</span></div></div>
+<div class="facts"><b>7–10× faster</b> matmuls · <b>bf16 accuracy</b> · RTX 20xx · T4 · Quadro RTX</div>
+</div></body></html>
