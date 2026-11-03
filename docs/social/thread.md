@@ -1,44 +1,21 @@
-1/ [image: 0_lead.png]
-PyTorch says my RTX 2080 Ti supports bf16:
-torch.cuda.is_bf16_supported() → True
+1/ [images: 0_lead.png, 1_hook.png]
+PyTorch says my RTX 2080 Ti supports bf16. Then it runs bf16 slower than fp32.
 
-Then it runs bf16 slower than fp32.
+So we built turing-bf16: run bf16 models on the fp16 tensor cores of Turing GPUs (RTX 20xx, T4), with bf16 accuracy.
 
-Out of pure frustration, we built turing-bf16 🧵
-
----
-2/ [image: 1_hook.png]
-Turing tensor cores do fp16, not bf16. So PyTorch falls back to a slow path.
-
-tbf16 runs bf16 on the fp16 tensor cores: 7–10× faster matmuls, bf16 accuracy.
+One line: tbf16.convert(model) 🧵
 
 ---
-3/ [image: 2_why.png]
-The trick: fp16 has MORE precision than bf16, just less range.
+2/ [images: 2_why.png, 3_models.png, 4_video.png]
+The trick: fp16 has more precision than bf16, just less range. Scale each row by a power of two (exact), run fp16 tensor cores, undo the scale.
 
-Scale each row by 2^k (exact), convert to fp16 losslessly, run the tensor cores, undo 2^k.
-
-No calibration, no clamping.
+vs plain PyTorch bf16 on a T4: Qwen3 7.4×, Wan2.1 6.1×, Gemma 3 6.0× (where .half() gives NaN). Training works too.
 
 ---
-4/ [image: 3_models.png]
-Unmodified models on a T4, one line: tbf16.convert(model)
+3/
+Honest scope: a PyTorch library, not a serving engine. If your model works in fp16, use fp16. tbf16 is for bf16-only models, or when you're unsure.
 
-Qwen3 7.4× · Wan2.1 6.1× · Gemma 3 6.0× · Sana 5.6×
+Credit to WanGP and fp16-fixer for similar per-model tricks.
 
-Same accuracy as native bf16. Training works too.
-
----
-5/ [image: 4_video.png]
-Wan2.1 on a 16 GB T4: 27 s → 4.5 s per step.
-
-The full 81-frame video runs out of memory in native bf16. With tbf16 it finishes in ~14 min.
-
----
-6/
-If your model is fp16-safe, .half() is still fine. tbf16 is for when it isn't, or when you don't know.
-
-Credit to WanGP and fp16-fixer, who used similar tricks for specific models.
-
-pip install turing-bf16
 github.com/tech-cosmos/turing-bf16
+pypi.org/project/turing-bf16
