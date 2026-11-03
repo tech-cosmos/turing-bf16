@@ -106,6 +106,8 @@ def run_vllm(model_key: str):
                 llm.generate([p], SamplingParams(max_tokens=1, temperature=0), use_tqdm=False)
                 ts.append(time.perf_counter() - t)
             rows[f"ttft_{n}_ms"] = median(ts[1:]) * 1e3
+        llm.generate([TokensPrompt(prompt_token_ids=prompt_ids(tok, 2048, 98))],
+                     SamplingParams(max_tokens=16, temperature=0), use_tqdm=False)  # decode warm-up
         p = TokensPrompt(prompt_token_ids=prompt_ids(tok, 2048, 99))
         t = time.perf_counter()
         o = llm.generate([p], SamplingParams(max_tokens=DECODE, min_tokens=DECODE, temperature=0), use_tqdm=False)
@@ -128,7 +130,8 @@ def run_sglang(model_key: str):
         tok = AutoTokenizer.from_pretrained(name)
         llm = sgl.Engine(model_path=name, dtype="auto", context_length=4096 + DECODE + 64, mem_fraction_static=0.85,
                          disable_radix_cache=True)
-        rows = {"dtype": str(getattr(llm.server_args, "dtype", "auto"))}
+        mc = getattr(getattr(llm, "tokenizer_manager", None), "model_config", None)
+        rows = {"dtype": str(getattr(mc, "dtype", getattr(llm.server_args, "dtype", "auto")))}
         for n in LENGTHS:
             ts = []
             for i in range(4):
@@ -137,6 +140,8 @@ def run_sglang(model_key: str):
                 llm.generate(input_ids=[ids], sampling_params={"max_new_tokens": 1, "temperature": 0})
                 ts.append(time.perf_counter() - t)
             rows[f"ttft_{n}_ms"] = median(ts[1:]) * 1e3
+        llm.generate(input_ids=[prompt_ids(tok, 2048, 98)],
+                     sampling_params={"max_new_tokens": 16, "temperature": 0})  # decode warm-up
         ids = prompt_ids(tok, 2048, 99)
         t = time.perf_counter()
         o = llm.generate(input_ids=[ids], sampling_params={"max_new_tokens": DECODE, "min_new_tokens": DECODE,
@@ -144,6 +149,9 @@ def run_sglang(model_key: str):
         total = time.perf_counter() - t
         rows["decode_tok_s"] = (DECODE - 1) / (total - rows["ttft_2048_ms"] / 1e3)
         rows["sample"] = o[0]["text"][:120]
+        out_ids = o[0].get("output_ids") or []
+        rows["n_out"] = len(out_ids)
+        rows["first_ids"] = list(out_ids[:12])
         llm.shutdown()
         report("sglang", name, rows, "dtype=auto")
     except Exception as e:

@@ -401,6 +401,42 @@ worse than torch bf16 in linear layers and 57x worse in attention (an outlier ch
 Small-channel error now matches torch bf16. On UMT5's real block-20 `wo` inputs, every path (torch
 bf16, fused, cuBLAS) is at 1.64-1.70e-3 against fp64.
 
+## Serving engines on a T4 (`bench/serving_compare.py`)
+
+How do vLLM and SGLang handle the same bf16 checkpoints on a Tesla T4? Setup:
+- One request at a time.
+- Prompts of exactly 2,048 and 4,096 tokens, with the token ids passed directly.
+- Prefix caching off, and a different prompt for each timed run.
+- Decode measured over 128 tokens after a warm-up.
+- Run on 2026-11-03.
+
+| | Qwen3-1.7B prompt 2k / 4k | decode | Gemma 3 4B prompt 2k / 4k | Gemma output |
+|---|---|---|---|---|
+| SGLang 0.5.23 | 265 / 590 ms | 60 tok/s | 577 / 1,214 ms | only token 0 (`<pad>`) x128 |
+| vLLM 0.33 (warns, falls back to fp16; fp32 for Gemma) | 853 / 3,060 ms | 47 tok/s | fails to load: fp32 needs ~17 GB | |
+| HF transformers + tbf16 | 381 / 838 ms | 17 tok/s | 875 / 2,076 ms | " Paris." (correct) |
+| HF transformers, native bf16 | 2,605 / 6,319 ms | 22 tok/s | 5,286 / 11,623 ms | correct |
+
+Reading it:
+- **fp16-safe models (Qwen3): SGLang is the fastest.** Its prompt processing is 1.4x faster than
+  HF + tbf16, and its decode is 3.5x faster (CUDA graphs and a serving scheduler, against HF's
+  eager `generate`).
+- **vLLM:** prefill is 2.2-3.6x slower than tbf16. FlashAttention 2 needs sm_80, so vLLM falls back
+  to Triton attention kernels, and Triton has no tensor-core path on sm_75. Its decode is fast.
+- **Models that overflow in fp16 (Gemma 3 4B):**
+  - vLLM upcasts to fp32 ("Falling back to torch.float32"), which does not fit in 16 GB.
+  - SGLang loads it but returns only `<pad>` tokens, which means NaN logits.
+  - HF + tbf16 is the only one of the three that answers, at 6x native bf16 speed.
+- **SGLang's precision is unclear.** Its "auto" dtype keeps the checkpoint's bf16 (from its source:
+  no Turing special case), but bf16 GEMMs run at under 3 TFLOPS on a T4, while its Qwen3 prefill
+  implies ~22. Its speed and the Gemma failure point to fp16 kernels somewhere in the stack. We did
+  not profile which.
+- **tbf16 is a library, not a serving engine.** For serving fp16-safe models on Turing, use an
+  engine. tbf16's place is bf16 correctness at tensor-core speed in plain PyTorch, and it could be
+  integrated into engines.
+- **Mistake caught along the way:** a first run left vLLM's default prefix caching on and measured
+  48 ms for a 2,048-token prompt (only the last token was computed). Those numbers were discarded.
+
 ## Dead ends and notes
 
 - Triton 3.9 emits no `mma` for sm_75 (`tl.dot` falls back to FMAs, ~0.2 TFLOPS), so the
