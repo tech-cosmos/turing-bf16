@@ -1,12 +1,12 @@
 <!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="style.css">
 <style>
-h1 { font-size: 80px; }
+h1 { font-size: 64px; line-height: 1.12; }
 h1 .q { color: var(--text-secondary); }
-.term { margin-top: 44px; background: #0f0f0e; border: 1px solid var(--rule); border-radius: 16px; overflow: hidden; }
+.term { margin-top: 34px; background: #0f0f0e; border: 1px solid var(--rule); border-radius: 16px; overflow: hidden; }
 .bar { height: 44px; background: #222220; display: flex; align-items: center; gap: 10px; padding: 0 18px; }
 .bar i { width: 13px; height: 13px; border-radius: 50%; background: #3c3c38; display: inline-block; }
 .bar span { margin-left: 14px; font-size: 17px; color: var(--text-muted); font-family: "JetBrains Mono", "SF Mono", Menlo, monospace; }
-pre { font-family: "JetBrains Mono", "SF Mono", Menlo, monospace; font-size: 32px; line-height: 1.6; padding: 30px 38px 34px; color: var(--text-primary); }
+pre { font-family: "JetBrains Mono", "SF Mono", Menlo, monospace; font-size: 29px; line-height: 1.55; padding: 24px 38px 28px; color: var(--text-primary); }
 .p { color: var(--text-muted); }
 .out { color: #7fd48a; }
 .c { color: var(--text-secondary); }
@@ -15,7 +15,7 @@ pre { font-family: "JetBrains Mono", "SF Mono", Menlo, monospace; font-size: 32p
 .hl { color: var(--tbf16); font-weight: 600; }
 .sub { font-size: 28px; margin-top: 20px; }
 </style></head><body class="viz-root"><div class="card">
-<h1>My GPU <span class="q">“supports”</span> bf16.</h1>
+<h1>PyTorch says my RTX 2080 Ti supports bf16.<br><span style="color:var(--bf16)">It runs slower than fp32.</span></h1>
 <div class="sub">Born out of frustration: a lab full of RTX 2080 Tis, and every new model ships in bf16.</div>
 <div class="term"><div class="bar"><i></i><i></i><i></i><span>python · RTX 2080 Ti</span></div>
 <pre><span class="p">&gt;&gt;&gt;</span> torch.cuda.is_bf16_supported()

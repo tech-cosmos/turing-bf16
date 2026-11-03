@@ -1,9 +1,8 @@
 1/ [image: 0_lead.png]
-My GPU "supports" bf16.
+PyTorch says my RTX 2080 Ti supports bf16:
+torch.cuda.is_bf16_supported() → True
 
-torch.cuda.is_bf16_supported() → True on an RTX 2080 Ti or T4.
-
-Then bf16 runs slower than fp32.
+Then it runs bf16 slower than fp32.
 
 Out of pure frustration, we built turing-bf16 🧵
 
