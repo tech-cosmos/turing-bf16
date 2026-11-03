@@ -1,7 +1,7 @@
 # Results
 
 All numbers on one NVIDIA GeForce RTX 2080 Ti (Turing, sm_75, 11 GB), torch 2.15 + CUDA 13.2,
-on pentek5. Timings are steady state (warm-up excluded).
+on a lab server with 8x RTX 2080 Ti. Timings are steady state (warm-up excluded).
 
 ## Why: bf16 on Turing is slower than fp32
 
@@ -155,7 +155,7 @@ Recipes, same init and same batches, two runs at a time on the 2080 Tis
 Honest reading: tbf16 gives bf16 training semantics (no loss scaling, no skipped steps, no
 overflow) at 1.5-2.6x the speed of native bf16, with matching loss curves. When a model
 trains fine in fp16 (both models above do at this scale), fp16 AMP is still 1.4-1.6x faster.
-The gap is mostly host overhead: at these small batches the step is CPU bound on pentek5's
+The gap is mostly host overhead: at these small batches the step is CPU bound on our lab server's
 2.2 GHz Xeons (LoRA: 970 ms wall vs 563 ms of GPU kernels for tbf16, 551 vs 392 for fp16),
 and tbf16 launches more kernels per layer. Larger batches shrink the gap.
 
@@ -405,7 +405,7 @@ bf16, fused, cuBLAS) is at 1.64-1.70e-3 against fp64.
 
 - Triton 3.9 emits no `mma` for sm_75 (`tl.dot` falls back to FMAs, ~0.2 TFLOPS), so the
   GEMM itself is cuBLAS fp16. Triton is fine for the elementwise kernels.
-- Triton's Python launcher costs ~45 us per call on pentek5's 2.2 GHz Xeons, which made
+- Triton's Python launcher costs ~45 us per call on our lab server's 2.2 GHz Xeons, which made
   decoding 30% slower than native. The memory-bound kernels are plain CUDA now.
 - Fused GEMM: storing mma fragments straight to global memory (16 bytes per row per
   instruction) made the output write ~5x slower than cuBLAS's and cost 6% end to end; the
@@ -418,7 +418,7 @@ bf16, fused, cuBLAS) is at 1.64-1.70e-3 against fp64.
   (ablation), explicit `prefetch.global.L2` 2-4 tiles ahead (slower, erratic). The
   `ld.global.nc.L2::128B` hint gives ~+1%; `L2::256B` needs sm_80. Per-K-block activation
   scales would need rescaling the fp32 accumulators every k-tile, so the scale is per row.
-- Benchmarks on pentek5: a 2080 Ti in that chassis goes from 45 C to 88 C in ~15 s of
+- Benchmarks on our lab server: a 2080 Ti in that chassis goes from 45 C to 88 C in ~15 s of
   back-to-back GEMMs and thermal-throttles to ~1.1-1.3 GHz (also capped at 250 W), so later
   columns of a plain run read 10-30% low. `bench/linear.py --cool` waits for 50 C before each
   measurement. When one GPU drops off the bus, CUDA renumbers the rest; pin by UUID.
