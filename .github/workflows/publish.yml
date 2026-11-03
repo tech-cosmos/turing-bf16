@@ -1,6 +1,6 @@
 # Publishes to PyPI when a version tag (v*) is pushed, via PyPI trusted publishing (no API token).
-# One-time setup on pypi.org: add a trusted publisher for project "turing-bf16" with this
-# repository, workflow "publish.yml" and environment "pypi".
+# One-time setup on pypi.org: add a (pending) trusted publisher for project "turing-bf16" with
+# owner "tech-cosmos", repository "turing-bf16", workflow "publish.yml", environment left blank.
 name: publish
 on:
   push:
@@ -8,7 +8,6 @@ on:
 jobs:
   pypi:
     runs-on: ubuntu-latest
-    environment: pypi
     permissions:
       id-token: write
     steps:
