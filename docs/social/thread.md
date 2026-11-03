@@ -40,4 +40,5 @@ If your model is fp16-safe, .half() is still fine. tbf16 is for when it isn't, o
 
 Credit to WanGP and fp16-fixer, who used similar tricks for specific models.
 
-RTX 20xx · T4 · Quadro RTX: [link]
+pip install turing-bf16
+github.com/tech-cosmos/turing-bf16
